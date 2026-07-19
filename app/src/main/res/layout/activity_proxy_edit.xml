@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <Button android:id="@+id/pxImport" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="📋 Import link / config (Hysteria2, TUIC, VLESS, SS, WireGuard…)" />
+        <TextView style="@style/Hint"
+            android:text="For SOCKS5/HTTP, just fill the fields below. For modern protocols, tap Import and paste the link." />
+
+        <TextView style="@style/Label" android:text="Proxy name" />
+        <EditText android:id="@+id/pxName" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:hint="e.g. US Minneapolis" android:inputType="text" android:autofillHints="" />
+
+        <TextView style="@style/Label" android:text="Host (or paste host:port:user:pass)" />
+        <EditText android:id="@+id/pxHost" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:hint="proxy.soax.com" android:inputType="textNoSuggestions" android:autofillHints="" />
+        <Button android:id="@+id/pxParse" style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Split paste" />
+
+        <TextView style="@style/Label" android:text="Port" />
+        <EditText android:id="@+id/pxPort" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:hint="5000" android:inputType="number" android:autofillHints="" />
+
+        <TextView style="@style/Label" android:text="Username (optional)" />
+        <EditText android:id="@+id/pxUser" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:inputType="textNoSuggestions" android:autofillHints="" />
+
+        <TextView style="@style/Label" android:text="Password (optional)" />
+        <EditText android:id="@+id/pxPass" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:inputType="textPassword" android:autofillHints="" />
+
+        <TextView style="@style/Label" android:text="Type" />
+        <Spinner android:id="@+id/pxType" android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <Button android:id="@+id/pxTest" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="16dp" android:text="Test proxy" />
+
+        <TextView android:id="@+id/pxStatus" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" android:textSize="14sp" android:text="" />
+
+        <Button android:id="@+id/pxSave" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="16dp" android:text="Save proxy" />
+
+        <Button android:id="@+id/pxAssignBlackbox" style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" android:text="📦 Assign to a BlackBox app" />
+    </LinearLayout>
+</ScrollView>

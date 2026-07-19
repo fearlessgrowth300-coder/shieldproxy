@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ShieldProxy</string>
+    <string name="subtitle">Mihomo rule engine — route each app through its own proxy node</string>
+
+    <string name="lbl_nodes">Proxy nodes</string>
+    <string name="hint_nodes">One per line:  name | type | host:port:user:pass  (type/auth optional, default socks5)</string>
+    <string name="lbl_appmap">App → node map</string>
+    <string name="hint_appmap">One per line:  package = node   e.g.  com.instagram.clone1 = US_1</string>
+    <string name="lbl_rules">Advanced rules (raw Clash, one per line)</string>
+    <string name="hint_rules">Any rule: DOMAIN-SUFFIX,instagram.com,US_1 · GEOIP,US,US_1 · AND,((DOMAIN-SUFFIX,x.com),(PROCESS-NAME,com.a)),US_1 · RULE-SET,ads,REJECT</string>
+    <string name="lbl_providers">Rule-set providers</string>
+    <string name="hint_providers">One per line:  name | behavior(domain/ipcidr/classical) | url</string>
+    <string name="lbl_mode">Process-match mode</string>
+    <string name="lbl_final">Final target (unmatched traffic)</string>
+    <string name="mem_conservative">Low-RAM mode (gvisor stack)</string>
+
+    <string name="start">Start engine</string>
+    <string name="stop">Stop engine</string>
+    <string name="preview">Preview generated config</string>
+    <string name="check_ip">Check my exit IP</string>
+    <string name="status_on">● Engine ON — rules active</string>
+    <string name="status_off">○ Engine off</string>
+</resources>

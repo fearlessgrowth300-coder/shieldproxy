@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.ShieldProxy" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/shield_accent</item>
+        <item name="colorOnPrimary">@color/shield_ink</item>
+        <item name="colorSecondary">@color/shield_accent</item>
+        <item name="colorSurface">@color/shield_surface</item>
+        <item name="colorOnSurface">@color/shield_text</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">@color/shield_background</item>
+        <item name="android:navigationBarColor">@color/shield_background</item>
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+</resources>

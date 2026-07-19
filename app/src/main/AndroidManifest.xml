@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <permission
+        android:name="com.privacyshield.proxy.permission.BRIDGE"
+        android:protectionLevel="signature" />
+
+    <uses-permission android:name="top.niunaijun.blackbox.permission.BRIDGE" />
+    <uses-permission android:name="com.novspace.box.permission.BRIDGE" />
+    <uses-permission android:name="app.cloudvault.multi.permission.BRIDGE" />
+    <uses-permission android:name="io.prismhub.clone.permission.BRIDGE" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Needed to resolve mapped app packages to their UID for per-app routing rules. -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Keep the proxy alive: exempt from Doze/battery-optimization so Samsung
+         doesn't put the VPN service to sleep after a few minutes. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- In-app updater: install a downloaded APK (sideload updates, no Play Store). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application
+        android:name=".ShieldApp"
+        android:allowBackup="false"
+        android:icon="@drawable/ic_shield"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ShieldProxy">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity android:name=".AuthActivity" android:exported="false" />
+        <activity android:name=".AccountSettingsActivity" android:exported="false" />
+        <activity android:name=".ProfileEditActivity" android:exported="false" />
+        <activity android:name=".ProxyEditActivity" android:exported="false" />
+        <activity android:name=".ProxyLibraryActivity" android:exported="false" />
+        <activity android:name=".AppPickerActivity" android:exported="false" />
+        <activity android:name=".LeakTestActivity" android:exported="false" />
+
+        <service
+            android:name=".ShieldVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse"
+            android:process=":vpn"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Routes selected apps through a user-supplied proxy" />
+        </service>
+
+        <service
+            android:name=".ProxyGuardService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Monitors each clone's proxy and closes the app if the proxy drops" />
+        </service>
+
+        <service
+            android:name=".BackupService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Serves the downloaded update APK to the system installer. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- Signed two-way handshake used by BlackBox's Settings page. -->
+        <provider
+            android:name=".core.ShieldBridgeProvider"
+            android:authorities="com.privacyshield.proxy.bridge"
+            android:exported="true"
+            android:permission="com.privacyshield.proxy.permission.BRIDGE" />
+    </application>
+</manifest>

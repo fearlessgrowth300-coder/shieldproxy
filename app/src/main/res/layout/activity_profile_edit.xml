@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView style="@style/Label" android:text="List name" />
+        <EditText android:id="@+id/profileName" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:hint="e.g. Elizabeth account" android:inputType="text" android:autofillHints="" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/routeAll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="Route my WHOLE phone through one proxy" />
+        <TextView style="@style/Hint"
+            android:text="On: every app uses the proxy below. Off: pick which apps use which proxy." />
+
+        <!-- Whole-device: single proxy -->
+        <LinearLayout android:id="@+id/routeAllBox" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
+            <TextView style="@style/Label" android:text="Proxy for the whole phone" />
+            <TextView android:id="@+id/allProxyLabel" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:textSize="14sp" android:paddingVertical="4dp" />
+            <Button android:id="@+id/chooseAllProxy" style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Choose proxy" />
+        </LinearLayout>
+
+        <!-- Per-app routes -->
+        <LinearLayout android:id="@+id/perAppBox" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:orientation="vertical">
+            <TextView style="@style/Label" android:text="Per-app proxies" />
+            <TextView style="@style/Hint"
+                android:text="Add a proxy and the apps that should use it. Add more proxies for other apps — they run at the same time." />
+            <LinearLayout android:id="@+id/routesContainer" android:layout_width="match_parent"
+                android:layout_height="wrap_content" android:orientation="vertical" />
+            <Button android:id="@+id/addRoute" style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="10dp" android:text="＋ Add proxy for apps" />
+        </LinearLayout>
+
+        <Button android:id="@+id/saveProfile" android:layout_width="match_parent" android:layout_height="56dp"
+            android:layout_marginTop="24dp" android:text="Save list" android:textSize="16sp" />
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto" android:layout_width="match_parent"
+    android:layout_height="wrap_content" android:layout_marginBottom="10dp"
+    android:foreground="?attr/selectableItemBackground" app:cardBackgroundColor="@color/shield_surface"
+    app:cardCornerRadius="20dp" app:cardElevation="0dp"
+    app:strokeColor="@color/shield_border" app:strokeWidth="1dp">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:padding="16dp">
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:gravity="center_vertical" android:orientation="horizontal">
+            <TextView android:layout_width="36dp" android:layout_height="36dp"
+                android:background="@drawable/bg_route_mark" android:gravity="center"
+                android:text="R" android:textColor="@color/shield_accent" android:textStyle="bold" />
+            <TextView android:id="@+id/pfName" android:layout_width="0dp"
+                android:layout_height="wrap_content" android:layout_marginStart="11dp"
+                android:layout_weight="1" android:ellipsize="end" android:maxLines="1"
+                android:textColor="@color/shield_text" android:textSize="17sp" android:textStyle="bold" />
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="SECURE" android:textColor="@color/shield_accent"
+                android:textSize="9sp" android:textStyle="bold" />
+        </LinearLayout>
+        <TextView android:id="@+id/pfDetail" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="10dp"
+            android:lineSpacingExtra="2dp" android:textColor="@color/shield_muted" android:textSize="12sp" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" android:orientation="horizontal">
+            <com.google.android.material.button.MaterialButton android:id="@+id/pfToggle"
+                android:layout_width="0dp" android:layout_height="48dp" android:layout_weight="1"
+                android:text="Open apps" android:textAllCaps="false" android:textColor="@color/shield_ink"
+                android:textStyle="bold" app:backgroundTint="@color/shield_accent" app:cornerRadius="15dp" />
+            <com.google.android.material.button.MaterialButton android:id="@+id/pfCheckIp"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp" android:layout_height="48dp" android:layout_marginStart="9dp"
+                android:layout_weight="1" android:text="Check exit" android:textAllCaps="false"
+                android:textColor="@color/shield_text" app:cornerRadius="15dp"
+                app:strokeColor="@color/shield_border" />
+        </LinearLayout>
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>
