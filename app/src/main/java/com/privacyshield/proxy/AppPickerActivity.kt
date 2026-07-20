@@ -64,8 +64,24 @@ class AppPickerActivity : AppCompatActivity() {
             val apps = AppList.installed(this)
             runOnUiThread {
                 all = bb + apps
+                // A restored profile may still contain a clone tag whose BlackBox user was
+                // deleted or whose app was moved to another user. Keeping that invisible value
+                // in `selected` makes the editor silently save both the stale and replacement
+                // clone. Prune only unavailable BlackBox tags; ordinary phone-app selections are
+                // left untouched because package visibility can be temporarily restricted.
+                val availableClones = bb.mapTo(HashSet()) { it.packageName }
+                val removedStaleClone = selected.removeAll {
+                    it.startsWith("bb:") && it !in availableClones
+                }
                 loading.visibility = View.GONE
                 adapter.filter("")
+                if (removedStaleClone) {
+                    android.widget.Toast.makeText(
+                        this,
+                        "Removed an unavailable BlackBox clone. Choose its current user.",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
             }
         }.start()
     }

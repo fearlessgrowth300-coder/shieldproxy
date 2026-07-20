@@ -16,10 +16,12 @@ import androidx.core.app.NotificationCompat
 import com.privacyshield.proxy.core.BlackBoxBridge
 import com.privacyshield.proxy.core.ProxyNode
 import com.privacyshield.proxy.core.ProxyTester
+import com.privacyshield.proxy.core.SecureFileStore
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Proxy kill-switch + connection guard.
@@ -27,10 +29,10 @@ import java.util.concurrent.atomic.AtomicInteger
  * The user's rule: a clone must NEVER run without a live proxy. Once they open an app we
  *   1. verify the proxy is connected BEFORE the app is entered (done in MainActivity pre-flight),
  *   2. keep testing it every POLL_SECS while the app is open,
- *   3. the instant the proxy or the phone network dies, FORCE-CLOSE the clone (not minimize) —
- *      so the real IP can never leak — and
- *   4. if the sticky SESSION expired, auto-rotate to a fresh session and show a countdown for the
- *      proxy to come back online; when it recovers we tell the user to re-open the app.
+ *      with native fail-closed routing covering the interval until the next scheduled check,
+ *   3. when the first scheduled health check confirms the proxy or phone network is down,
+ *      FORCE-CLOSE the clone (not minimize), and
+ *   4. keep the same sticky session on failure and tell the user when it is safe to re-open.
  *
  * The guard keeps running (foreground service) until the user turns it off. The native connect()
  * hook inside the container is already fail-closed (dead proxy -> ECONNREFUSED, no direct fallback),
@@ -51,7 +53,6 @@ class ProxyGuardService : Service() {
         @Volatile var ip = ""
         @Volatile var aliveSince = 0L        // elapsedRealtime of first OK (session-age readout)
         @Volatile var nextTestAt = 0L        // elapsedRealtime target -> live countdown
-        @Volatile var rotatedCount = 0
         @Volatile var lastRouteCheckAt = 0L
         @Volatile var testing = false
     }
@@ -70,6 +71,7 @@ class ProxyGuardService : Service() {
         bg = Handler(worker.looper)
         ui = Handler(mainLooper)
         checks = Executors.newFixedThreadPool(4)
+        restoreArmedState()
         startForeground(FG_ID, buildNotification())
         ui.post(ticker)
     }
@@ -97,6 +99,12 @@ class ProxyGuardService : Service() {
                             a.lastRouteCheckAt = SystemClock.elapsedRealtime()
                             a.nextTestAt = SystemClock.elapsedRealtime() + POLL_SECS * 1000L
                             ARMED[tag] = a
+                            ARMED_LAST[tag] = a
+                            if (!persistArmedState()) {
+                                ARMED.remove(tag)
+                                ARMED_LAST.remove(tag)
+                                bg.post { BlackBoxBridge.stopClone(this, auth, uid, pkg) }
+                            }
                             updateNotif()
                         }
                     } catch (_: Exception) {}
@@ -110,6 +118,7 @@ class ProxyGuardService : Service() {
                     // off until I off it", so an explicit off means stop using that proxy = stop app.
                     val a = ARMED_LAST.remove(tag)
                     if (a != null) bg.post { BlackBoxBridge.stopClone(this, a.auth, a.userId, a.pkg) }
+                    persistArmedState()
                 }
                 if (ARMED.isEmpty()) { stopSelf(); return START_NOT_STICKY }
                 updateNotif()
@@ -117,11 +126,92 @@ class ProxyGuardService : Service() {
             ACTION_STOP_ALL -> {
                 val snapshot = ARMED.values.toList()
                 ARMED.clear()
+                ARMED_LAST.clear()
+                persistArmedState()
                 bg.post { snapshot.forEach { BlackBoxBridge.stopClone(this, it.auth, it.userId, it.pkg) } }
                 stopSelf(); return START_NOT_STICKY
             }
         }
         return START_STICKY
+    }
+
+    /**
+     * A foreground service can be recreated with a null Intent after Android kills its process.
+     * Keep the exact guarded routes in the account-key encrypted store so that recreation never
+     * produces a visible but empty guard. Restored entries are checked immediately rather than
+     * inheriting their old in-memory "connected" state.
+     */
+    private fun restoreArmedState() {
+        ARMED.clear()
+        ARMED_LAST.clear()
+        if (!SecureFileStore.exists(this, STATE_FILE)) return
+        val encoded = runCatching { SecureFileStore.readText(this, STATE_FILE) }.getOrElse {
+            failClosedGuardRestore(it)
+            return
+        } ?: return
+        val now = SystemClock.elapsedRealtime()
+        runCatching {
+            val array = JSONArray(encoded)
+            for (index in 0 until array.length()) {
+                val item = array.getJSONObject(index)
+                val node = ProxyNode.fromJson(item.getJSONObject("node"))
+                val tag = item.getString("tag")
+                val auth = item.getString("auth")
+                val userId = item.getInt("userId")
+                val pkg = item.getString("pkg")
+                val label = item.optString("label", pkg)
+                val routeId = item.getString("routeId")
+                val expectedExitIp = item.getString("expectedExitIp")
+                val expectedTag = "bb:$auth:$userId:$pkg"
+                if (tag != expectedTag || !node.isValid() || routeId.isBlank() || expectedExitIp.isBlank()) {
+                    continue
+                }
+                val armed = Armed(node, tag, auth, userId, pkg, label, routeId, expectedExitIp).apply {
+                    state = "checking"
+                    aliveSince = now
+                    nextTestAt = now
+                    lastRouteCheckAt = 0L
+                }
+                ARMED[tag] = armed
+                ARMED_LAST[tag] = armed
+            }
+        }.onFailure {
+            ARMED.clear()
+            ARMED_LAST.clear()
+            failClosedGuardRestore(it)
+        }
+    }
+
+    /** If protected guard state exists but cannot authenticate, stop every configured clone. */
+    private fun failClosedGuardRestore(error: Throwable) {
+        android.util.Log.e("ProxyGuardService", "Encrypted guard state could not be restored", error)
+        bg.post {
+            BlackBoxBridge.configuredRoutes(this).forEach { route ->
+                BlackBoxBridge.stopClone(this, route.authority, route.userId, route.pkg)
+            }
+        }
+    }
+
+    /** Credentials are written only through SecureFileStore (AES-GCM + account key). */
+    private fun persistArmedState(): Boolean = runCatching {
+        val array = JSONArray()
+        ARMED.values.sortedBy { it.tag }.forEach { armed ->
+            array.put(JSONObject().apply {
+                put("node", armed.node.toJson())
+                put("tag", armed.tag)
+                put("auth", armed.auth)
+                put("userId", armed.userId)
+                put("pkg", armed.pkg)
+                put("label", armed.label)
+                put("routeId", armed.routeId)
+                put("expectedExitIp", armed.expectedExitIp)
+            })
+        }
+        SecureFileStore.writeText(this, STATE_FILE, array.toString())
+        true
+    }.getOrElse {
+        android.util.Log.e("ProxyGuardService", "Encrypted guard state could not be saved", it)
+        false
     }
 
     // 1-second ticker: refreshes the live countdown in the notification, and every POLL_SECS kicks
@@ -195,7 +285,7 @@ class ProxyGuardService : Service() {
     }
 
     /** Proxy confirmed unreachable: CLOSE the clone (fail-closed, no leak) but KEEP THE SAME sticky
-     *  session/IP. We do NOT auto-rotate anymore — minting a fresh session changes the exit IP, which
+     *  session. We do NOT auto-rotate anymore — minting a fresh session changes the exit IP, which
      *  logs logged-in accounts (IG etc.) straight OUT. Instead we keep re-testing the SAME session and
      *  recover when it comes back (24h sticky sessions rarely die; a blip is usually transient). */
     private fun onProxyDead(a: Armed) {
@@ -205,9 +295,9 @@ class ProxyGuardService : Service() {
         a.city = ""; a.type = ""; a.ip = ""
         a.nextTestAt = SystemClock.elapsedRealtime() + POLL_SECS * 1000L
         alert(a, if (wasRunning)
-            "⚠ ${a.label} — proxy unreachable. App CLOSED to stop any leak. Keeping your IP; will reconnect when the proxy is back."
+            "⚠ ${a.label} — proxy unreachable. App CLOSED to stop any leak. Route reserved; re-open only after the proxy is back."
         else
-            "⚠ ${a.label} — proxy unreachable. Keeping your IP; will reconnect when it's back.")
+            "⚠ ${a.label} — proxy unreachable. App remains closed. Route reserved until the proxy is back.")
     }
 
     private fun onRouteViolation(a: Armed, reason: String) {
@@ -216,27 +306,6 @@ class ProxyGuardService : Service() {
         a.city = ""; a.type = ""; a.ip = ""
         a.nextTestAt = SystemClock.elapsedRealtime() + POLL_SECS * 1000L
         alert(a, "${a.label} - route identity changed ($reason). App CLOSED to prevent a cross-clone or direct-IP leak.")
-    }
-
-    private fun pushProxy(a: Armed) {
-        try {
-            val e = android.os.Bundle().apply {
-                putInt("userId", a.userId); putString("pkg", a.pkg)
-                putString("type", a.node.type); putString("server", a.node.server); putInt("port", a.node.port)
-                putString("username", a.node.username); putString("password", a.node.password)
-            }
-            contentResolver.call(BlackBoxBridge.baseFor(a.auth), "setProxy", null, e)
-        } catch (_: Exception) {}
-    }
-
-    private fun newSessionId(): String {
-        // Fresh alphanumeric token; SOAX treats a new sessionid as a brand-new sticky IP.
-        val n = System.nanoTime() + SEQ.getAndIncrement().toLong() * 1_000_003L
-        val chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-        val sb = StringBuilder("sp")
-        var v = if (n < 0) -n else n
-        repeat(10) { sb.append(chars[(v % 36).toInt()]); v /= 36 }
-        return sb.toString()
     }
 
     // ---- Notification --------------------------------------------------------
@@ -260,7 +329,7 @@ class ProxyGuardService : Service() {
                 }
                 "recovering" -> {
                     val secs = ((a.nextTestAt - now) / 1000).coerceAtLeast(0)
-                    "🟡 ${a.label} — proxy down, rotated${if (a.rotatedCount > 1) " x${a.rotatedCount}" else ""} · rechecking in ${secs}s"
+                    "🟡 ${a.label} — proxy recovering; app remains closed · rechecking in ${secs}s"
                 }
                 "down" -> "🔴 ${a.label} — proxy DOWN (no session to rotate). App closed."
                 else -> "⏳ ${a.label} — checking…"
@@ -331,15 +400,14 @@ class ProxyGuardService : Service() {
         // fall back to the phone IP; it only delays the user-facing "proxy down" decision.
         private const val POLL_SECS = 60          // proxy re-test cadence while an app is open
         private const val ROUTE_VERIFY_SECS = 60  // heavier in-guest exit/guard proof
-        private const val FAIL_STRIKES = 3        // consecutive failures before we kill the clone
+        private const val FAIL_STRIKES = 1        // first confirmed failure closes the clone
+        private const val STATE_FILE = "proxy_guard_state.sec"
         private const val FG_ID = 4801
         private const val CHANNEL = "proxy_guard"
         private const val CHANNEL_ALERT = "proxy_guard_alert"
         const val ACTION_ARM = "com.privacyshield.proxy.GUARD_ARM"
         const val ACTION_DISARM = "com.privacyshield.proxy.GUARD_DISARM"
         const val ACTION_STOP_ALL = "com.privacyshield.proxy.GUARD_STOP_ALL"
-
-        private val SEQ = AtomicInteger(0)
 
         /** Live armed state, readable by MainActivity to render "connected" chips in the list. */
         val ARMED = ConcurrentHashMap<String, Armed>()
@@ -371,6 +439,15 @@ class ProxyGuardService : Service() {
         fun stopAll(ctx: Context) {
             val i = Intent(ctx, ProxyGuardService::class.java).setAction(ACTION_STOP_ALL)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i) else ctx.startService(i)
+        }
+
+        /** Restart a previously armed encrypted guard after reboot or package replacement. */
+        fun restorePersisted(ctx: Context) {
+            if (!SecureFileStore.exists(ctx, STATE_FILE)) return
+            val app = ctx.applicationContext
+            val intent = Intent(app, ProxyGuardService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) app.startForegroundService(intent)
+            else app.startService(intent)
         }
 
         /** One-line status for the clone with [tag], or null if not armed. */

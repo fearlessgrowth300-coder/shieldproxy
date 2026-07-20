@@ -33,6 +33,19 @@ class ProfileEditActivity : AppCompatActivity() {
     }
 
     private class Route(var proxy: String?, val apps: LinkedHashSet<String> = linkedSetOf())
+    private data class PendingClone(
+        val tag: String,
+        val authority: String,
+        val userId: Int,
+        val pkg: String,
+        val node: com.privacyshield.proxy.core.ProxyNode
+    )
+    private data class PendingClear(
+        val tag: String,
+        val authority: String,
+        val userId: Int,
+        val pkg: String
+    )
 
     private lateinit var nameField: EditText
     private lateinit var routeAll: MaterialSwitch
@@ -200,15 +213,17 @@ class ProfileEditActivity : AppCompatActivity() {
         finish()
     }
 
-    /** Run the isolation rules; commit immediately if clean, else prompt (Move / Save anyway). */
+    /** Run the isolation rules; commit immediately if clean, else require move/correction. */
     private fun validateThenCommit(name: String, valid: List<Route>) {
         val intendedBb = LinkedHashMap<String, String>()  // clone tag -> node name
         for (r in valid) r.apps.forEach { pkg -> if (pkg.startsWith("bb:")) intendedBb[pkg] = r.proxy!! }
         val tags = intendedBb.keys.toList()
 
         val conflicts = com.privacyshield.proxy.core.AssignmentRules.crossProfileConflicts(this, profileId, tags)
-        val coloc = com.privacyshield.proxy.core.AssignmentRules.sensitiveCoLocations(tags)
-        val gms = com.privacyshield.proxy.core.AssignmentRules.gmsProxyInconsistencies(this, intendedBb)
+        val coloc = com.privacyshield.proxy.core.AssignmentRules
+            .sensitiveCoLocations(this, profileId, tags)
+        val gms = com.privacyshield.proxy.core.AssignmentRules
+            .gmsProxyInconsistencies(this, profileId, intendedBb)
         if (conflicts.isEmpty() && coloc.isEmpty() && gms.isEmpty()) { commitPerApp(name, valid); return }
 
         val msg = StringBuilder()
@@ -231,79 +246,183 @@ class ProfileEditActivity : AppCompatActivity() {
             .setTitle(if (conflicts.isNotEmpty()) "Move clone(s)?" else "Isolation warning")
             .setMessage(msg.toString().trim())
             .setNegativeButton("Cancel", null)
-        if (conflicts.isNotEmpty()) {
-            b.setPositiveButton("Move here" + if (hardBlock) " & save anyway" else "") { _, _ ->
+        if (hardBlock) {
+            // These are security boundaries, not advisory warnings. Require the user to separate
+            // the virtual users or make the shared-GMS route consistent before saving.
+            b.setPositiveButton("OK", null)
+        } else if (conflicts.isNotEmpty()) {
+            b.setPositiveButton("Move here") { _, _ ->
                 com.privacyshield.proxy.core.AssignmentRules.moveTagsHere(this, profileId, conflicts.map { it.tag })
                 commitPerApp(name, valid)
             }
-        } else {
-            b.setPositiveButton("Save anyway") { _, _ -> commitPerApp(name, valid) }
         }
         b.show()
     }
 
-    /** Build the config, push proxies into the container clones, persist, and report. */
+    /** Build, validate, apply, then persist. A rejected clone never becomes a saved claim. */
     private fun commitPerApp(name: String, valid: List<Route>) {
         val lib = ProxyLibrary.load(this)
+        val previousCloneTags = profileId
+            ?.let { ProfileStore.get(this, it) }
+            ?.config?.bbMap?.keys?.toSet()
+            .orEmpty()
         val cfg = RoutingConfig().apply { processMatchMode = ProcessMatchMode.ALWAYS }
         val added = HashSet<String>()
-        var bbOk = 0; var bbFail = 0
+        val pendingClones = ArrayList<PendingClone>()
+        val localErrors = ArrayList<String>()
         for (route in valid) {
-            val node = lib.firstOrNull { it.node.name == route.proxy }?.node ?: continue
-            route.apps.forEach { pkg ->
-                if (pkg.startsWith("bb:")) {
-                    // BlackBox clone → remember it in the profile and push the proxy into that
-                    // variant via its bridge (routed by the container, not this VPN — clones share
-                    // one UID). Tag format: "bb:<authority>:<userId>:<realpkg>".
-                    cfg.bbMap[pkg] = node.name
-                    // Register the node (not mapped to any app) so "Check IP" can test it. It is NOT
-                    // added to appMap, so the VPN never routes real traffic through it.
+            val node = lib.firstOrNull { it.node.name == route.proxy }?.node
+            if (node == null || !node.isValid()) {
+                localErrors.add("${route.proxy ?: "Unknown proxy"}: proxy is missing or invalid")
+                continue
+            }
+            route.apps.forEach { tag ->
+                if (tag.startsWith("bb:")) {
+                    cfg.bbMap[tag] = node.name
                     if (added.add(node.name)) cfg.nodes.add(node)
-                    val parts = pkg.split(":", limit = 4)
-                    val auth = parts.getOrNull(1)
-                    val uid = parts.getOrNull(2)?.toIntOrNull()
-                    val realPkg = parts.getOrNull(3)
-                    if (auth != null && uid != null && assignBlackBox(auth, uid, realPkg, node)) bbOk++ else bbFail++
+                    val parts = tag.split(":", limit = 4)
+                    val authority = parts.getOrNull(1)
+                    val userId = parts.getOrNull(2)?.toIntOrNull()
+                    val pkg = parts.getOrNull(3)
+                    if (authority != null && userId != null && pkg != null) {
+                        pendingClones.add(PendingClone(tag, authority, userId, pkg, node))
+                    } else {
+                        localErrors.add("${AppList.labelFor(this, tag)}: invalid clone identifier")
+                    }
                 } else {
                     if (added.add(node.name)) cfg.nodes.add(node)
-                    cfg.appMap[pkg] = node.name
+                    cfg.appMap[tag] = node.name
                 }
             }
         }
         cfg.finalTarget = "DIRECT"
 
-        // Persist first, THEN report what actually happened (not just "Saved").
-        val id = profileId ?: ProfileStore.newId(ProfileStore.load(this).size + name.hashCode())
-        ProfileStore.upsert(this, Profile(id, name, cfg))
-        val msg = when {
-            bbFail > 0 && bbOk > 0 -> "Saved. $bbOk clone(s) routed; $bbFail couldn't be reached — open them in their app once, then Save again."
-            bbFail > 0 -> "Saved, but couldn't reach $bbFail clone(s). Open that app (BlackBox/NovSpace/…) once so it registers, then Save again."
-            bbOk > 0 -> "Saved ✓ $bbOk clone(s) routed. Reopen them in their app to apply."
-            else -> "Saved ✓"
+        if (localErrors.isNotEmpty()) {
+            showSaveFailure("List not saved", localErrors)
+            return
         }
-        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+
+        // Phase 1 is read-only. Validate all clones before any credential file is changed.
+        val preflightErrors = pendingClones.mapNotNull { pending ->
+            val result = com.privacyshield.proxy.core.BlackBoxBridge.canSetCloneProxy(
+                this, pending.authority, pending.userId, pending.pkg, pending.node
+            )
+            if (result.ok) null else "${AppList.labelFor(this, pending.tag)}: " +
+                result.error.ifBlank { result.state.ifBlank { "BlackBox rejected the assignment" } }
+        }
+        if (preflightErrors.isNotEmpty()) {
+            showSaveFailure("List not saved", preflightErrors)
+            return
+        }
+
+        // Phase 2 applies only the already-validated routes. A runtime bridge/storage failure still
+        // prevents ProfileStore from claiming an assignment BlackBox did not acknowledge.
+        val commitErrors = pendingClones.mapNotNull { pending ->
+            val result = com.privacyshield.proxy.core.BlackBoxBridge.setCloneProxy(
+                this, pending.authority, pending.userId, pending.pkg, pending.node
+            )
+            if (result.ok) null else "${AppList.labelFor(this, pending.tag)}: " +
+                result.error.ifBlank { result.state.ifBlank { "BlackBox could not commit the assignment" } }
+        }
+        if (commitErrors.isNotEmpty()) {
+            showSaveFailure(
+                "List not saved",
+                commitErrors,
+                "Some validated routes may already have reached BlackBox. Fix the error and Save again; protected clones remain fail-closed."
+            )
+            return
+        }
+
+        // New assignments are live and verified by BlackBox. Now remove clone routes that this
+        // edit deleted or moved to another virtual user. Without this phase, the old encrypted
+        // route and its shared-GMS copy remain active even though Shield no longer displays them.
+        val removedClones = (previousCloneTags - cfg.bbMap.keys).mapNotNull { tag ->
+            val parts = tag.split(":", limit = 4)
+            val authority = parts.getOrNull(1)
+            val userId = parts.getOrNull(2)?.toIntOrNull()
+            val pkg = parts.getOrNull(3)
+            if (authority != null && userId != null && pkg != null) {
+                PendingClear(tag, authority, userId, pkg)
+            } else null
+        }
+        val clearErrors = removedClones.mapNotNull { pending ->
+            val result = com.privacyshield.proxy.core.BlackBoxBridge.clearCloneProxy(
+                this, pending.authority, pending.userId, pending.pkg
+            )
+            if (result.ok) null else "${AppList.labelFor(this, pending.tag)}: " +
+                result.error.ifBlank { result.state.ifBlank { "BlackBox could not clear the old assignment" } }
+        }
+        if (clearErrors.isNotEmpty()) {
+            showSaveFailure(
+                "List not saved",
+                clearErrors,
+                "New routes were applied, but an old BlackBox route could not be removed. Protected clones remain fail-closed; fix the connection and Save again."
+            )
+            return
+        }
+
+        val id = profileId ?: ProfileStore.newId(ProfileStore.load(this).size + name.hashCode())
+        val profile = Profile(id, name, cfg)
+        val claimedTags = ProfileStore.load(this)
+            .filter { it.id != id }
+            .flatMapTo(LinkedHashSet()) { it.config.bbMap.keys }
+            .apply { addAll(cfg.bbMap.keys) }
+        val unusedRoutes = com.privacyshield.proxy.core.BlackBoxBridge.configuredRoutes(this)
+            .filter { it.tag !in claimedTags }
+        if (unusedRoutes.isNotEmpty()) {
+            val labels = unusedRoutes.take(8).joinToString("\n") {
+                " • ${AppList.labelFor(this, it.tag)}"
+            } + if (unusedRoutes.size > 8) "\n • +${unusedRoutes.size - 8} more" else ""
+            AlertDialog.Builder(this)
+                .setTitle("Remove unused clone routes?")
+                .setMessage(
+                    "$labels\n\nThese routes are not used by any saved list. They may be leftovers from a moved/deleted clone or direct assignments you want to keep."
+                )
+                .setPositiveButton("Remove and save") { _, _ ->
+                    val errors = unusedRoutes.mapNotNull { route ->
+                        val result = com.privacyshield.proxy.core.BlackBoxBridge.clearCloneProxy(
+                            this, route.authority, route.userId, route.pkg
+                        )
+                        if (result.ok) null else "${AppList.labelFor(this, route.tag)}: " +
+                            result.error.ifBlank { result.state.ifBlank { "BlackBox could not clear the route" } }
+                    }
+                    if (errors.isNotEmpty()) {
+                        showSaveFailure("List not saved", errors)
+                    } else {
+                        persistProfile(profile, pendingClones.size)
+                    }
+                }
+                .setNegativeButton("Keep and save") { _, _ ->
+                    persistProfile(profile, pendingClones.size)
+                }
+                .setNeutralButton("Cancel", null)
+                .show()
+            return
+        }
+        persistProfile(profile, pendingClones.size)
+    }
+
+    private fun persistProfile(profile: Profile, cloneCount: Int) {
+        ProfileStore.upsert(this, profile)
+        val message = if (cloneCount > 0) {
+            "Saved ✓ $cloneCount clone(s) routed. Reopen them in their app to apply."
+        } else "Saved ✓"
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
         finish()
     }
 
-    /** Write a proxy to a BlackBox clone (User) via the owning variant's bridge.
-     *  @return true if the container acknowledged the assignment. */
-    private fun assignBlackBox(authority: String, userId: Int, realPkg: String?, node: com.privacyshield.proxy.core.ProxyNode): Boolean {
-        return try {
-            val base = com.privacyshield.proxy.core.BlackBoxBridge.baseFor(authority)
-            val extras = android.os.Bundle().apply {
-                putInt("userId", userId)
-                if (realPkg != null) putString("pkg", realPkg)   // per-app proxy (else legacy per-user)
-                putString("type", node.type)
-                putString("server", node.server)
-                putInt("port", node.port)
-                putString("username", node.username)
-                putString("password", node.password)
-            }
-            val res = contentResolver.call(base, "setProxy", null, extras)
-            res?.getBoolean("ok") == true
-        } catch (_: Exception) {
-            false
+    private fun showSaveFailure(title: String, errors: List<String>, note: String? = null) {
+        val distinct = errors.distinct()
+        val body = buildString {
+            append(distinct.take(6).joinToString("\n\n"))
+            if (distinct.size > 6) append("\n\n+${distinct.size - 6} more")
+            if (!note.isNullOrBlank()) append("\n\n").append(note)
         }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(body)
+            .setPositiveButton("OK", null)
+            .show()
     }
 
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()

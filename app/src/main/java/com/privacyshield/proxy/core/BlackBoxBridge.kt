@@ -5,6 +5,9 @@ import android.net.Uri
 
 /** One clone (User) exposed by a specific BlackBox variant's bridge. */
 data class BbClone(val authority: String, val userId: Int, val pkg: String, val label: String)
+data class BbConfiguredRoute(val authority: String, val userId: Int, val pkg: String) {
+    val tag: String get() = "bb:$authority:$userId:$pkg"
+}
 
 data class BbProxyAssignment(
     val ok: Boolean, val routeId: String = "", val state: String = "", val error: String = ""
@@ -17,6 +20,14 @@ data class BbRouteVerification(
 
 data class BbIdentityStatus(
     val ok: Boolean, val digest: String = "", val error: String = ""
+)
+
+data class BbUserSecurityState(
+    val ok: Boolean,
+    val sharedGmsActive: Boolean = false,
+    val gmsInstalled: Boolean = false,
+    val keepAliveEnabled: Boolean = false,
+    val error: String = ""
 )
 
 /** Non-secret result of the signed app-to-app readiness handshake. */
@@ -80,6 +91,29 @@ object BlackBoxBridge {
 
     fun base(ctx: Context): Uri? = authority(ctx)?.let { baseFor(it) }
 
+    /** List only user-facing per-clone route keys. Credentials and shared-GMS copies never cross
+     * the bridge. Used to let the user review routes that are no longer claimed by any list. */
+    fun configuredRoutes(ctx: Context): List<BbConfiguredRoute> {
+        val out = ArrayList<BbConfiguredRoute>()
+        for (auth in installedAuthorities(ctx)) {
+            try {
+                ctx.contentResolver.query(
+                    Uri.withAppendedPath(baseFor(auth), "routes"), null, null, null, null
+                )?.use { c ->
+                    while (c.moveToNext()) {
+                        val userId = c.getInt(0)
+                        val pkg = c.getString(1)
+                        if (userId >= 0 && !pkg.isNullOrBlank()) {
+                            out.add(BbConfiguredRoute(auth, userId, pkg))
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return out.distinctBy { it.tag }
+    }
+
     /** Verify that a signed BlackBox variant is unlocked and belongs to this account. */
     fun connectionStatus(ctx: Context): BbConnectionStatus {
         val localOwner = VaultKeyStore.ownerHash(ctx)
@@ -138,6 +172,44 @@ object BlackBoxBridge {
         BbProxyAssignment(false, error = e.message ?: e.javaClass.simpleName)
     }
 
+    /** Remove one exact clone assignment. BlackBox also stops that virtual app and resynchronizes
+     * shared GMS, so an edited profile cannot leave an orphaned route active in the old user. */
+    fun clearCloneProxy(
+        ctx: Context, authority: String, userId: Int, pkg: String
+    ): BbProxyAssignment = try {
+        val extras = android.os.Bundle().apply {
+            putInt("userId", userId)
+            putString("pkg", pkg)
+        }
+        val r = ctx.contentResolver.call(baseFor(authority), "clearProxy", null, extras)
+        BbProxyAssignment(
+            ok = r?.getBoolean("ok") == true,
+            state = r?.getString("state").orEmpty(),
+            error = r?.getString("err").orEmpty()
+        )
+    } catch (e: Exception) {
+        BbProxyAssignment(false, error = e.message ?: e.javaClass.simpleName)
+    }
+
+    /** Read-only phase of a profile save. No BlackBox credential file or process is changed. */
+    fun canSetCloneProxy(
+        ctx: Context, authority: String, userId: Int, pkg: String, node: ProxyNode
+    ): BbProxyAssignment = try {
+        val extras = android.os.Bundle().apply {
+            putInt("userId", userId); putString("pkg", pkg)
+            putString("type", node.type); putString("server", node.server); putInt("port", node.port)
+            putString("username", node.username); putString("password", node.password)
+        }
+        val r = ctx.contentResolver.call(baseFor(authority), "canSetProxy", null, extras)
+        BbProxyAssignment(
+            ok = r?.getBoolean("ok") == true,
+            state = r?.getString("state").orEmpty(),
+            error = r?.getString("err").orEmpty()
+        )
+    } catch (e: Exception) {
+        BbProxyAssignment(false, error = e.message ?: e.javaClass.simpleName)
+    }
+
     /** Start only the isolated guest process. Proxy setup runs during process initialization,
      * before the cloned app's Application is created or its foreground activity is shown. */
     fun prepareRoute(ctx: Context, authority: String, userId: Int, pkg: String): BbProxyAssignment = try {
@@ -164,6 +236,25 @@ object BlackBoxBridge {
         )
     } catch (e: Exception) {
         BbIdentityStatus(false, error = e.message ?: e.javaClass.simpleName)
+    }
+
+    /** Ask the signed BlackBox bridge whether this exact virtual user shares GMS. A failed query
+     * is intentionally distinguishable from a verified `false`, so assignment validation can
+     * fail closed rather than allowing an unsafe second proxy. */
+    fun userSecurityState(
+        ctx: Context, authority: String, userId: Int
+    ): BbUserSecurityState = try {
+        val extras = android.os.Bundle().apply { putInt("userId", userId) }
+        val r = ctx.contentResolver.call(baseFor(authority), "userSecurityState", null, extras)
+        BbUserSecurityState(
+            ok = r?.getBoolean("ok") == true,
+            sharedGmsActive = r?.getBoolean("sharedGmsActive") == true,
+            gmsInstalled = r?.getBoolean("gmsInstalled") == true,
+            keepAliveEnabled = r?.getBoolean("keepAliveEnabled") == true,
+            error = r?.getString("err").orEmpty()
+        )
+    } catch (e: Exception) {
+        BbUserSecurityState(false, error = e.message ?: e.javaClass.simpleName)
     }
 
     /** Prove the live guest has the assigned route and that its own TCP request exits on the IP

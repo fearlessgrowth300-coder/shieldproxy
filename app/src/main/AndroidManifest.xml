@@ -82,6 +82,16 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Re-arm the encrypted fail-closed monitor after a reboot or in-place app update. -->
+        <receiver
+            android:name=".ProxyGuardBootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
         <!-- Serves the downloaded update APK to the system installer. -->
         <provider
             android:name="androidx.core.content.FileProvider"

@@ -51,8 +51,8 @@ object ProxyTester {
             val inp = socket.getInputStream()
 
             when {
-                node.type.startsWith("http") -> httpConnect(out, inp, node)
-                else -> socks5Connect(out, inp, node) // socks5 default
+                node.type.lowercase().startsWith("http") -> httpConnect(out, inp, node, HOST, PORT)
+                else -> socks5Connect(out, inp, node, HOST, PORT) // socks5 default
             }
 
             val ssl = (SSLSocketFactory.getDefault() as SSLSocketFactory)
@@ -70,7 +70,7 @@ object ProxyTester {
             if (ip.isEmpty() || !ip.matches(Regex("^[0-9a-fA-F:.]+$"))) {
                 return Result(false, error = "no IP returned")
             }
-            val info = if (lookupMetadata) lookupInfo(ip) else Pair("", "")
+            val info = if (lookupMetadata) lookupInfo(node, ip) else Pair("", "")
             return Result(true, ip = ip, city = info.first, type = info.second)
         } catch (e: Exception) {
             return Result(false, error = e.message ?: e.javaClass.simpleName)
@@ -81,7 +81,9 @@ object ProxyTester {
 
     // ---- SOCKS5 ------------------------------------------------------------
 
-    private fun socks5Connect(out: OutputStream, inp: InputStream, node: ProxyNode) {
+    private fun socks5Connect(
+        out: OutputStream, inp: InputStream, node: ProxyNode, targetHost: String, targetPort: Int
+    ) {
         val hasAuth = node.username.isNotEmpty()
         // greeting
         if (hasAuth) out.write(byteArrayOf(0x05, 0x01, 0x02)) else out.write(byteArrayOf(0x05, 0x01, 0x00))
@@ -103,11 +105,11 @@ object ProxyTester {
             else -> throw RuntimeException("proxy refused auth methods")
         }
         // CONNECT to HOST:PORT by domain
-        val host = HOST.toByteArray()
+        val host = targetHost.toByteArray()
         val req = ArrayList<Byte>()
         req.add(0x05); req.add(0x01); req.add(0x00); req.add(0x03)
         req.add(host.size.toByte()); host.forEach { req.add(it) }
-        req.add(((PORT shr 8) and 0xff).toByte()); req.add((PORT and 0xff).toByte())
+        req.add(((targetPort shr 8) and 0xff).toByte()); req.add((targetPort and 0xff).toByte())
         out.write(req.toByteArray()); out.flush()
         val head = ByteArray(4); readFully(inp, head)
         if (head[1].toInt() != 0x00) throw RuntimeException("proxy CONNECT failed (code ${head[1].toInt()})")
@@ -123,9 +125,11 @@ object ProxyTester {
 
     // ---- HTTP CONNECT ------------------------------------------------------
 
-    private fun httpConnect(out: OutputStream, inp: InputStream, node: ProxyNode) {
+    private fun httpConnect(
+        out: OutputStream, inp: InputStream, node: ProxyNode, targetHost: String, targetPort: Int
+    ) {
         val sb = StringBuilder()
-        sb.append("CONNECT $HOST:$PORT HTTP/1.1\r\nHost: $HOST:$PORT\r\n")
+        sb.append("CONNECT $targetHost:$targetPort HTTP/1.1\r\nHost: $targetHost:$targetPort\r\n")
         if (node.username.isNotEmpty()) {
             val cred = Base64.encodeToString("${node.username}:${node.password}".toByteArray(), Base64.NO_WRAP)
             sb.append("Proxy-Authorization: Basic $cred\r\n")
@@ -166,16 +170,34 @@ object ProxyTester {
         return reader.readText()
     }
 
-    /** Best-effort city + connection-TYPE lookup (direct, not through the proxy) via ip-api.com,
+    /** Best-effort city + connection-TYPE lookup through the same proxy via ip-api.com,
      *  which exposes mobile/proxy/hosting flags. For multi-accounting: Mobile = strongest,
      *  Residential = good, Datacenter/Flagged = easily detected & banned — avoid. Returns
      *  Pair(city, type). */
-    private fun lookupInfo(ip: String): Pair<String, String> {
+    private fun lookupInfo(node: ProxyNode, ip: String): Pair<String, String> {
+        var socket: Socket? = null
         return try {
-            val url = java.net.URL("http://ip-api.com/json/$ip?fields=status,city,mobile,proxy,hosting,isp")
-            val conn = url.openConnection() as java.net.HttpURLConnection
-            conn.connectTimeout = 8000; conn.readTimeout = 8000
-            val o = org.json.JSONObject(conn.inputStream.bufferedReader().readText())
+            val metadataHost = "ip-api.com"
+            val metadataPort = 80
+            socket = Socket().apply {
+                connect(InetSocketAddress(node.server, node.port), TIMEOUT_MS)
+                soTimeout = TIMEOUT_MS
+            }
+            val out = socket.getOutputStream()
+            val inp = socket.getInputStream()
+            if (node.type.lowercase().startsWith("http")) {
+                httpConnect(out, inp, node, metadataHost, metadataPort)
+            } else {
+                socks5Connect(out, inp, node, metadataHost, metadataPort)
+            }
+            val path = "/json/$ip?fields=status,city,mobile,proxy,hosting,isp"
+            out.write(
+                ("GET $path HTTP/1.1\r\nHost: $metadataHost\r\n" +
+                    "User-Agent: ShieldProxy\r\nConnection: close\r\n\r\n").toByteArray()
+            )
+            out.flush()
+            val o = org.json.JSONObject(readHttpBody(inp))
+            if (o.optString("status") != "success") return Pair("", "")
             val city = o.optString("city", "")
             val mobile = o.optBoolean("mobile", false)
             val proxy = o.optBoolean("proxy", false)
@@ -189,6 +211,8 @@ object ProxyTester {
             Pair(city, type)
         } catch (_: Exception) {
             Pair("", "")
+        } finally {
+            try { socket?.close() } catch (_: Exception) {}
         }
     }
 }

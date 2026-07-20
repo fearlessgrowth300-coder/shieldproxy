@@ -75,8 +75,19 @@ object AssignmentRules {
 
     // 2. Sensitive co-location ---------------------------------------------------
 
-    /** BlackBox users ("authority:userId") that would host MORE THAN ONE IG/WhatsApp account. */
-    fun sensitiveCoLocations(tags: Collection<String>): List<String> {
+    /** BlackBox users ("authority:userId") that would host MORE THAN ONE IG/WhatsApp account,
+     * including assignments already stored in other lists. */
+    fun sensitiveCoLocations(
+        ctx: Context, thisProfileId: String?, tags: Collection<String>
+    ): List<String> {
+        val allTags = LinkedHashSet<String>()
+        ProfileStore.load(ctx).filter { it.id != thisProfileId }
+            .forEach { allTags.addAll(it.config.bbMap.keys) }
+        allTags.addAll(tags)
+        return sensitiveCoLocationsFromTags(allTags)
+    }
+
+    internal fun sensitiveCoLocationsFromTags(tags: Collection<String>): List<String> {
         val byUser = HashMap<String, MutableList<String>>()
         for (t in tags.mapNotNull { parse(it) }) {
             if (t.pkg in SENSITIVE) byUser.getOrPut(t.user) { mutableListOf() }.add(t.pkg)
@@ -88,15 +99,48 @@ object AssignmentRules {
 
     data class GmsInconsistency(val user: String, val nodes: Set<String>)
 
-    /** For every shared-GMS user, the set of distinct nodes its clones use — a violation if >1. */
-    fun gmsProxyInconsistencies(ctx: Context, bbMap: Map<String, String>): List<GmsInconsistency> {
-        val byUser = HashMap<String, MutableSet<String>>()
-        for ((tag, node) in bbMap) {
+    /** For every shared-GMS user, include assignments in every saved list plus this pending edit. */
+    fun gmsProxyInconsistencies(
+        ctx: Context, thisProfileId: String?, bbMap: Map<String, String>
+    ): List<GmsInconsistency> {
+        val combined = LinkedHashMap<String, String>()
+        ProfileStore.load(ctx).filter { it.id != thisProfileId }
+            .forEach { combined.putAll(it.config.bbMap) }
+        combined.putAll(bbMap)
+        val sharedByUser = HashMap<String, Boolean>()
+        for ((tag, node) in combined) {
             val t = parse(tag) ?: continue
-            if (GmsShareStore.isEnabled(ctx, t.authority, t.userId)) {
-                byUser.getOrPut(t.user) { mutableSetOf() }.add(node)
+            val shared = sharedByUser.getOrPut(t.user) {
+                if (GmsShareStore.isEnabled(ctx, t.authority, t.userId)) {
+                    true
+                } else {
+                    val remote = BlackBoxBridge.userSecurityState(
+                        ctx, t.authority, t.userId
+                    )
+                    // A bridge/auth/version failure is not proof that GMS is disabled. Enforce
+                    // one route until the signed container can provide a definite answer.
+                    !remote.ok || remote.sharedGmsActive
+                }
+            }
+            sharedByUser[t.user] = shared
+        }
+        return gmsProxyInconsistenciesFromAssignments(
+            combined,
+            sharedByUser.filterValues { it }.keys
+        )
+    }
+
+    internal fun gmsProxyInconsistenciesFromAssignments(
+        assignments: Map<String, String>, sharedUsers: Set<String>
+    ): List<GmsInconsistency> {
+        val byUser = HashMap<String, MutableSet<String>>()
+        for ((tag, node) in assignments) {
+            val parsed = parse(tag) ?: continue
+            if (parsed.user in sharedUsers) {
+                byUser.getOrPut(parsed.user) { mutableSetOf() }.add(node)
             }
         }
-        return byUser.filter { it.value.size > 1 }.map { GmsInconsistency(it.key, it.value) }
+        return byUser.filter { it.value.size > 1 }
+            .map { GmsInconsistency(it.key, it.value) }
     }
 }

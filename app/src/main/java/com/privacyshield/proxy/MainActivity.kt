@@ -354,10 +354,9 @@ class MainActivity : AppCompatActivity() {
 
     // ---- Live session monitor ------------------------------------------------
     // Instead of a one-shot Check IP the user has to keep re-tapping, this opens a
-    // dialog that auto-re-tests every AUTO_SECS, shows each proxy's exit IP + a
-    // session-age/TTL readout, and — when a sticky session dies (2 strikes) —
-    // AUTO-ROTATES the sessionid to a fresh one so it recovers instead of the user
-    // waiting an unknown time or browsing with no proxy.
+    // read-only dialog that re-tests every AUTO_SECS and shows each proxy's exit IP
+    // plus a session-age/TTL readout. Health monitoring must never rewrite a sticky
+    // session behind a logged-in clone.
 
     private var monitorHandler: android.os.Handler? = null
 
@@ -383,7 +382,6 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Session monitor — ${p.name}")
             .setMessage("Testing ${nodes.size} proxy(s)…\n(mobile proxies take a few seconds)")
             .setPositiveButton("Close", null)
-            .setNeutralButton("Rotate session now", null)   // wired below (no auto-dismiss)
             .setCancelable(true)
             .create()
         dialog.setOnDismissListener { handler.removeCallbacksAndMessages(null); monitorHandler = null }
@@ -411,7 +409,6 @@ class MainActivity : AppCompatActivity() {
                     val results = live.values.map { node ->
                         node to com.privacyshield.proxy.core.ProxyTester.test(node)
                     }
-                    var rotatedAny = false
                     for ((node, r) in results) {
                         if (r.ok) {
                             strikes[node.name] = 0
@@ -419,10 +416,8 @@ class MainActivity : AppCompatActivity() {
                         } else if (!r.reachableOnly) {
                             val s = (strikes[node.name] ?: 0) + 1
                             strikes[node.name] = s
-                            // AUTO-ROTATE DISABLED: minting a fresh session changes the exit IP, which
-                            // logs logged-in accounts (IG etc.) OUT. We now only REPORT the session as
-                            // down and let the user rotate manually ("Rotate session now") if they want
-                            // to — a persistent account should keep its SAME sticky IP as long as possible.
+                            // Read-only monitor: report the failure. Never mutate the session token
+                            // or a running clone's route from a background health check.
                         }
                     }
                     val lines = results.map { (node, r) ->
@@ -431,14 +426,11 @@ class MainActivity : AppCompatActivity() {
                         when {
                             r.ok && r.reachableOnly -> "• ${node.name}: reachable$age"
                             r.ok -> "✓ ${node.name}: ${r.ip}${if (r.city.isNotBlank()) " (${r.city})" else ""}${if (r.type.isNotBlank()) " · ${r.type}" else ""}$age"
-                            (strikes[node.name] ?: 0) == 0 && node.hasRotatableSession() ->
-                                "↻ ${node.name}: session died — rotated to a fresh one, re-testing…$age"
                             else -> "✗ ${node.name}: ${r.error}$age"
                         }
                     }
                     runOnUiThread {
-                        baseLines = lines.joinToString("\n") +
-                                (if (rotatedAny) "\n\n(reopen the clone to use the new session)" else "")
+                        baseLines = lines.joinToString("\n")
                         counter[0] = AUTO_SECS
                         busy[0] = false
                         dialog.setMessage("$baseLines\n\nAuto-checking… next in ${counter[0]}s")
@@ -463,85 +455,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Manual rotate-all (doesn't dismiss the dialog).
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener {
-            dialog.setMessage("Rotating session(s)…")
-            handler.removeCallbacksAndMessages(null)
-            Thread {
-                live.keys.toList().forEach { name ->
-                    val node = live[name] ?: return@forEach
-                    if (node.hasRotatableSession()) {
-                        val fresh = rotateSession(p, node)
-                        if (fresh != null) { live[name] = fresh; aliveSince.remove(name); strikes[name] = 0 }
-                    }
-                }
-                runOnUiThread { runCheck() }
-            }.start()
-        }
-
         runCheck()
-    }
-
-    /**
-     * Mint a fresh sticky-session for [node]: swap its `sessionid-XXXX` token for a
-     * new random one and persist it everywhere it's referenced — the proxy library,
-     * this profile's node list, and (live) every clone in the profile routed through
-     * it, via the container bridge. Returns the new node, or null if not rotatable.
-     * The clone picks up the new session when it's next (re)opened.
-     */
-    private fun rotateSession(p: Profile, node: com.privacyshield.proxy.core.ProxyNode):
-            com.privacyshield.proxy.core.ProxyNode? {
-        if (!node.hasRotatableSession()) return null
-        val newId = buildString {
-            val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-            val rnd = java.util.Random()
-            repeat(16) { append(alphabet[rnd.nextInt(alphabet.length)]) }
-        }
-        val fresh = node.withNewSession(newId)
-
-        // 1) proxy library (match by name)
-        try {
-            val lib = ProxyLibrary.load(this)
-            val idx = lib.indexOfFirst { it.node.name == node.name }
-            if (idx >= 0) { lib[idx] = lib[idx].copy(node = fresh, lastIp = "", lastCity = ""); ProxyLibrary.save(this, lib) }
-        } catch (_: Exception) {}
-
-        // 2) this profile's node list
-        try {
-            val i = p.config.nodes.indexOfFirst { it.name == node.name }
-            if (i >= 0) { p.config.nodes[i] = fresh; ProfileStore.upsert(this, p) }
-        } catch (_: Exception) {}
-
-        // 3) re-push to every clone in this profile routed through this node
-        try {
-            for ((tag, nodeName) in p.config.bbMap) {
-                if (nodeName != node.name) continue
-                val parts = tag.split(":", limit = 4)
-                val auth = parts.getOrNull(1) ?: continue
-                val uid = parts.getOrNull(2)?.toIntOrNull() ?: continue
-                val realPkg = parts.getOrNull(3)
-                pushProxyToClone(auth, uid, realPkg, fresh)
-            }
-        } catch (_: Exception) {}
-
-        return fresh
-    }
-
-    /** Write a proxy to a clone (User+app) via its variant's bridge setProxy. */
-    private fun pushProxyToClone(authority: String, userId: Int, realPkg: String?, node: com.privacyshield.proxy.core.ProxyNode): Boolean {
-        return try {
-            val base = com.privacyshield.proxy.core.BlackBoxBridge.baseFor(authority)
-            val extras = android.os.Bundle().apply {
-                putInt("userId", userId)
-                if (realPkg != null) putString("pkg", realPkg)
-                putString("type", node.type)
-                putString("server", node.server)
-                putInt("port", node.port)
-                putString("username", node.username)
-                putString("password", node.password)
-            }
-            contentResolver.call(base, "setProxy", null, extras)?.getBoolean("ok") == true
-        } catch (_: Exception) { false }
     }
 
     /** Automation: launch every app mapped in this list, so all accounts open
