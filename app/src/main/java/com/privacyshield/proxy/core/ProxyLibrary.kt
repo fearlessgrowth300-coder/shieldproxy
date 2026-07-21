@@ -123,6 +123,9 @@ object ProxyLibrary {
             for (k in cfg.appMap.keys.toList()) if (cfg.appMap[k] == old) {
                 cfg.appMap[k] = new; changed = true
             }
+            for (k in cfg.bbMap.keys.toList()) if (cfg.bbMap[k] == old) {
+                cfg.bbMap[k] = new; changed = true
+            }
             if (cfg.finalTarget == old) { cfg.finalTarget = new; changed = true }
         }
         if (changed) saveProfilesAndRefreshActive(ctx, profiles)
