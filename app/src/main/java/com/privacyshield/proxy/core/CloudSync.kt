@@ -34,7 +34,6 @@ object CloudSync {
                 zip.closeEntry()
             }
         }
-        require(verifyLatest(ctx)) { "Drive backup could not be verified" }
     }
 
     @Synchronized
@@ -159,16 +158,6 @@ object CloudSync {
             throw error
         }
     }
-
-    /** Read back every encrypted byte and ZIP CRC without changing local settings. */
-    private fun verifyLatest(ctx: Context): Boolean = DriveVault.restore(ctx, APP_TAG) { zip ->
-        val buffer = ByteArray(64 * 1024)
-        while (true) {
-            zip.nextEntry ?: break
-            while (zip.read(buffer) >= 0) Unit
-            zip.closeEntry()
-        }
-    }.restored
 
     fun pushAsync(ctx: Context) {
         val app = ctx.applicationContext

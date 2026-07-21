@@ -22,6 +22,7 @@ import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 /**
  * Proxy kill-switch + connection guard.
@@ -61,11 +62,13 @@ class ProxyGuardService : Service() {
     private lateinit var bg: Handler
     private lateinit var ui: Handler
     private lateinit var checks: ExecutorService
+    @Volatile private var destroyed = false
 
     override fun onBind(i: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        destroyed = false
         createChannel()
         worker = HandlerThread("proxy-guard").also { it.start() }
         bg = Handler(worker.looper)
@@ -218,6 +221,7 @@ class ProxyGuardService : Service() {
     // off the actual proxy tests on the worker thread.
     private val ticker = object : Runnable {
         override fun run() {
+            if (destroyed) return
             if (ARMED.isNotEmpty()) runTests()
             maybeCheckRemote()
             updateNotif()
@@ -236,11 +240,13 @@ class ProxyGuardService : Service() {
     }
 
     private fun runTests() {
+        if (destroyed || checks.isShutdown) return
         val now = SystemClock.elapsedRealtime()
         for (a in ARMED.values.toList()) {
             if (!ARMED.containsKey(a.tag) || a.testing || now < a.nextTestAt) continue
             a.testing = true
-            checks.execute {
+            try {
+                checks.execute {
                 val r = ProxyTester.test(a.node, lookupMetadata = false)
                 a.nextTestAt = SystemClock.elapsedRealtime() + POLL_SECS * 1000L
                 if (r.ok) {
@@ -280,6 +286,10 @@ class ProxyGuardService : Service() {
                 }
                 a.testing = false
                 ui.post { updateNotif() }
+                }
+            } catch (_: RejectedExecutionException) {
+                a.testing = false
+                if (!destroyed) ui.post { updateNotif() }
             }
         }
     }
@@ -389,6 +399,8 @@ class ProxyGuardService : Service() {
     }
 
     override fun onDestroy() {
+        destroyed = true
+        try { ui.removeCallbacks(ticker) } catch (_: Exception) {}
         try { checks.shutdownNow() } catch (_: Exception) {}
         try { worker.quitSafely() } catch (_: Exception) {}
         super.onDestroy()

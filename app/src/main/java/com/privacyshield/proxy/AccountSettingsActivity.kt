@@ -55,7 +55,8 @@ class AccountSettingsActivity : AppCompatActivity() {
         })
         root.addView(TextView(this).apply {
             text = "Signed-in email\n${Supabase.email(this@AccountSettingsActivity) ?: "Unknown"}\n\n" +
-                "Account type\nPasswordless email code\n\nBackup\nSynced to your account (cloud)"
+                "Account type\nPasswordless email code\n\nGoogle Drive\n" +
+                if (DriveFolderStore.isConnected(this@AccountSettingsActivity)) "Connected" else "Not connected"
             textSize = 16f; setTextColor(Color.LTGRAY); setPadding(0, gap, 0, gap)
         })
         root.addView(TextView(this).apply {
@@ -69,8 +70,9 @@ class AccountSettingsActivity : AppCompatActivity() {
         root.addView(connectionStatus)
         connectionButton = actionButton("Connect / verify BlackBox") { verifyBlackBoxConnection() }
         root.addView(connectionButton)
-        root.addView(actionButton("Back up to cloud now") { emit(ACTION_BACKUP) })
-        root.addView(actionButton("Restore from cloud") { emit(ACTION_RESTORE) })
+        root.addView(actionButton("Select / change Google Drive folder") { emit(ACTION_DRIVE) })
+        root.addView(actionButton("Back up proxies and routes to Drive") { emit(ACTION_BACKUP) })
+        root.addView(actionButton("Restore proxies and routes from Drive") { emit(ACTION_RESTORE) })
 
         root.addView(sectionLabel("Security checks"))
         root.addView(actionButton("Leak test (DNS / IPv6 / proxy)") {

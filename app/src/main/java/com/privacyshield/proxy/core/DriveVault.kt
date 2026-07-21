@@ -1,6 +1,7 @@
 package com.privacyshield.proxy.core
 
 import android.content.Context
+import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
@@ -31,6 +32,11 @@ object DriveVault {
 
     /** One recoverable point-in-time backup. [name] is the snapshot's folder id (a timestamp). */
     data class Snapshot(val name: String, val createdAt: Long, val plainBytes: Long, val parts: Int)
+    private data class SnapshotReceipt(
+        val snapshot: DocumentFile,
+        val complete: DocumentFile,
+        val parts: List<DocumentFile>
+    )
 
     fun hasBackup(ctx: Context, appTag: String): Boolean = latestSnapshot(ctx, appTag) != null
 
@@ -48,8 +54,10 @@ object DriveVault {
                 .put("parts", sink.partCount)
                 .put("plainBytes", sink.plainBytes)
                 .put("sha256", sink.sha256)
-            writeEncryptedBlob(ctx, snapshot, "complete.sbx", manifest.toString().toByteArray(), key,
+            val complete = writeEncryptedBlob(ctx, snapshot, "complete.sbx", manifest.toString().toByteArray(), key,
                 "manifest|$appTag")
+            verifyCreatedSnapshot(ctx, snapshot, complete, sink.partFiles, appTag, key)
+            saveReceipt(ctx, appTag, snapshot, complete, sink.partFiles)
             prune(appDir, keep = RETENTION)
         } catch (e: Exception) {
             runCatching { snapshot.delete() }
@@ -57,8 +65,16 @@ object DriveVault {
         }
     }
 
-    fun restore(ctx: Context, appTag: String, readZip: (ZipInputStream) -> Unit): RestoreResult =
-        restoreSnapshotDir(ctx, appTag, latestSnapshot(ctx, appTag), readZip)
+    fun restore(ctx: Context, appTag: String, readZip: (ZipInputStream) -> Unit): RestoreResult {
+        loadReceipt(ctx, appTag)?.let { receipt ->
+            val direct = runCatching {
+                restoreSnapshotDir(ctx, appTag, receipt.snapshot, readZip,
+                    receipt.complete, receipt.parts)
+            }.getOrNull()
+            if (direct?.restored == true) return direct
+        }
+        return restoreSnapshotDir(ctx, appTag, latestSnapshot(ctx, appTag), readZip)
+    }
 
     /** Restore a specific snapshot by its [name] (from [listSnapshots]) instead of the latest. */
     fun restoreByName(
@@ -73,17 +89,22 @@ object DriveVault {
     }
 
     private fun restoreSnapshotDir(
-        ctx: Context, appTag: String, snapshot: DocumentFile?, readZip: (ZipInputStream) -> Unit
+        ctx: Context,
+        appTag: String,
+        snapshot: DocumentFile?,
+        readZip: (ZipInputStream) -> Unit,
+        knownComplete: DocumentFile? = null,
+        knownParts: List<DocumentFile>? = null
     ): RestoreResult {
         val key = VaultKeyStore.load(ctx) ?: error("Backup encryption is not unlocked")
         if (snapshot == null) return RestoreResult(false)
-        val complete = snapshot.findFile("complete.sbx") ?: return RestoreResult(false)
+        val complete = knownComplete ?: snapshot.findFile("complete.sbx") ?: return RestoreResult(false)
         val manifest = JSONObject(String(readEncryptedBlob(ctx, complete, key, "manifest|$appTag")))
         if (manifest.optInt("format") != FORMAT || manifest.optString("app") != appTag) {
             error("Unsupported or mismatched backup")
         }
         val expectedParts = manifest.getInt("parts")
-        val source = ChunkedEncryptedInput(ctx, snapshot, appTag, key, expectedParts)
+        val source = ChunkedEncryptedInput(ctx, snapshot, appTag, key, expectedParts, knownParts)
         ZipInputStream(source).use { zip -> readZip(zip) }
         if (source.sha256 != manifest.getString("sha256")) error("Backup integrity check failed")
         return RestoreResult(true, manifest.optLong("createdAt"))
@@ -154,6 +175,72 @@ object DriveVault {
     private fun aad(appTag: String, index: Int) =
         "ShieldBox|$FORMAT|$appTag|$index".toByteArray()
 
+    private fun saveReceipt(
+        ctx: Context,
+        appTag: String,
+        snapshot: DocumentFile,
+        complete: DocumentFile,
+        parts: List<DocumentFile>
+    ) {
+        val json = JSONObject()
+            .put("root", DriveFolderStore.root(ctx)?.uri?.toString())
+            .put("owner", VaultKeyStore.ownerHash(ctx))
+            .put("snapshot", snapshot.uri.toString())
+            .put("complete", complete.uri.toString())
+            .put("parts", org.json.JSONArray(parts.map { it.uri.toString() }))
+        ctx.getSharedPreferences("drive_snapshot_receipts", Context.MODE_PRIVATE)
+            .edit().putString(appTag, json.toString()).commit()
+    }
+
+    private fun loadReceipt(ctx: Context, appTag: String): SnapshotReceipt? = runCatching {
+        val raw = ctx.getSharedPreferences("drive_snapshot_receipts", Context.MODE_PRIVATE)
+            .getString(appTag, null) ?: return null
+        val json = JSONObject(raw)
+        if (json.optString("root") != DriveFolderStore.root(ctx)?.uri?.toString()) return null
+        if (json.optString("owner") != VaultKeyStore.ownerHash(ctx)) return null
+        val partJson = json.getJSONArray("parts")
+        val parts = (0 until partJson.length()).map { index ->
+            DocumentFile.fromSingleUri(ctx, Uri.parse(partJson.getString(index)))
+                ?: error("Invalid backup part receipt")
+        }
+        SnapshotReceipt(
+            DocumentFile.fromSingleUri(ctx, Uri.parse(json.getString("snapshot")))
+                ?: error("Invalid backup snapshot receipt"),
+            DocumentFile.fromSingleUri(ctx, Uri.parse(json.getString("complete")))
+                ?: error("Invalid backup completion receipt"),
+            parts
+        )
+    }.getOrNull()
+
+    /**
+     * Verify through the exact SAF handles returned by createFile(). Google Drive may not expose
+     * newly-created children through listFiles()/findFile() immediately, even though those handles
+     * are already readable. A later restore still discovers snapshots through the completion file.
+     */
+    private fun verifyCreatedSnapshot(
+        ctx: Context,
+        snapshot: DocumentFile,
+        complete: DocumentFile,
+        parts: List<DocumentFile>,
+        appTag: String,
+        key: SecretKeySpec
+    ) {
+        val manifest = JSONObject(String(readEncryptedBlob(ctx, complete, key, "manifest|$appTag")))
+        val expectedParts = manifest.getInt("parts")
+        require(parts.size == expectedParts) { "Backup is missing one or more parts" }
+        val source = ChunkedEncryptedInput(ctx, snapshot, appTag, key, expectedParts, parts)
+        ZipInputStream(source).use { zip ->
+            val buffer = ByteArray(64 * 1024)
+            while (zip.nextEntry != null) {
+                while (zip.read(buffer) >= 0) Unit
+                zip.closeEntry()
+            }
+        }
+        require(source.sha256 == manifest.getString("sha256")) {
+            "Backup integrity check failed"
+        }
+    }
+
     private fun createFile(parent: DocumentFile, name: String): DocumentFile {
         parent.findFile(name)?.let { runCatching { it.delete() } }
         return parent.createFile("application/octet-stream", name)
@@ -167,7 +254,7 @@ object DriveVault {
         plain: ByteArray,
         key: SecretKeySpec,
         aadText: String
-    ) {
+    ): DocumentFile {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key)
         cipher.updateAAD(aadText.toByteArray())
@@ -183,6 +270,7 @@ object DriveVault {
                 out.write(encrypted)
             }
         }
+        return file
     }
 
     private fun readEncryptedBlob(
@@ -215,6 +303,7 @@ object DriveVault {
         private var used = 0
         private var index = 0
         private val digest = MessageDigest.getInstance("SHA-256")
+        val partFiles = mutableListOf<DocumentFile>()
         var plainBytes: Long = 0; private set
         val partCount: Int get() = index
         val sha256: String get() = digest.digest().joinToString("") { "%02x".format(it) }
@@ -255,6 +344,7 @@ object DriveVault {
                     out.write(encrypted)
                 }
             }
+            partFiles += file
             index++
             used = 0
         }
@@ -265,9 +355,10 @@ object DriveVault {
         snapshot: DocumentFile,
         private val appTag: String,
         private val key: SecretKeySpec,
-        expectedParts: Int
+        expectedParts: Int,
+        createdParts: List<DocumentFile>? = null
     ) : InputStream() {
-        private val parts = snapshot.listFiles().filter {
+        private val parts = createdParts ?: snapshot.listFiles().filter {
             it.isFile && it.name?.matches(Regex("part-\\d{5}\\.sbx")) == true
         }.sortedBy { it.name }
         private var nextPart = 0

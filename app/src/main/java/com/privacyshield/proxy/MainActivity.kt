@@ -69,9 +69,11 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             if (result.resultCode != RESULT_OK) return@registerForActivityResult
             when (result.data?.getStringExtra(AccountSettingsActivity.EXTRA_ACTION)) {
-                AccountSettingsActivity.ACTION_BACKUP -> backupNow()
-                AccountSettingsActivity.ACTION_RESTORE -> confirmRestore()
-                AccountSettingsActivity.ACTION_DRIVE -> toast("Cloud sync uses your account — no Google Drive needed.")
+                AccountSettingsActivity.ACTION_BACKUP ->
+                    if (DriveFolderStore.isConnected(this)) backupNow() else driveFolderPicker.launch(null)
+                AccountSettingsActivity.ACTION_RESTORE ->
+                    if (DriveFolderStore.isConnected(this)) confirmRestore() else driveFolderPicker.launch(null)
+                AccountSettingsActivity.ACTION_DRIVE -> driveFolderPicker.launch(null)
                 AccountSettingsActivity.ACTION_LOGOUT -> logoutAccount()
             }
         }
@@ -617,8 +619,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun backupNow() {
+        if (!DriveFolderStore.isConnected(this)) {
+            driveFolderPicker.launch(null)
+            return
+        }
         SupaSync.pushAsync(this)
-        toast("Backing up to your account…")
+        BackupService.startBackup(this)
+        toast("Encrypted Google Drive backup is running in the notification area")
     }
 
     private fun confirmRestore() {
@@ -631,14 +638,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun restoreNow() {
-        toast("Restoring from your account…")
-        Thread {
-            val ok = runCatching { SupaSync.pull(this) }.getOrDefault(false)
-            runOnUiThread {
-                refresh()
-                toast(if (ok) "Restored from your account ✓" else "No cloud backup found yet")
-            }
-        }.start()
+        if (!DriveFolderStore.isConnected(this)) {
+            driveFolderPicker.launch(null)
+            return
+        }
+        BackupService.startRestore(this)
+        toast("Encrypted Google Drive restore is running in the notification area")
     }
 
     /**
