@@ -47,6 +47,51 @@ object ProxyLibrary {
         val idx = list.indexOfFirst { it.node.name == proxy.node.name }
         if (idx >= 0) list[idx] = proxy else list.add(proxy)
         save(ctx, list)
+        replaceNodeInProfiles(ctx, proxy.node)
+    }
+
+    /**
+     * Saved profiles contain a protected copy of each node. Reconcile those copies with the
+     * reusable library so editing US credentials to UK cannot keep launching an old US route.
+     */
+    fun reconcileProfiles(ctx: Context): Boolean {
+        val nodesByName = load(ctx).associate { it.node.name to it.node }
+        if (nodesByName.isEmpty()) return false
+        val profiles = ProfileStore.load(ctx)
+        var changed = false
+        for (profile in profiles) {
+            val nodes = profile.config.nodes
+            for (i in nodes.indices) {
+                val latest = nodesByName[nodes[i].name] ?: continue
+                if (nodes[i] != latest) {
+                    nodes[i] = latest
+                    changed = true
+                }
+            }
+        }
+        if (changed) saveProfilesAndRefreshActive(ctx, profiles)
+        return changed
+    }
+
+    private fun replaceNodeInProfiles(ctx: Context, latest: ProxyNode) {
+        val profiles = ProfileStore.load(ctx)
+        var changed = false
+        for (profile in profiles) {
+            val nodes = profile.config.nodes
+            for (i in nodes.indices) {
+                if (nodes[i].name == latest.name && nodes[i] != latest) {
+                    nodes[i] = latest
+                    changed = true
+                }
+            }
+        }
+        if (changed) saveProfilesAndRefreshActive(ctx, profiles)
+    }
+
+    private fun saveProfilesAndRefreshActive(ctx: Context, profiles: List<Profile>) {
+        val activeId = ProfileStore.activeId(ctx)
+        ProfileStore.saveAll(ctx, profiles, activeId)
+        if (activeId != null) ProfileStore.activate(ctx, activeId)
     }
 
     fun delete(ctx: Context, name: String) {
@@ -80,6 +125,6 @@ object ProxyLibrary {
             }
             if (cfg.finalTarget == old) { cfg.finalTarget = new; changed = true }
         }
-        if (changed) ProfileStore.saveAll(ctx, profiles, ProfileStore.activeId(ctx))
+        if (changed) saveProfilesAndRefreshActive(ctx, profiles)
     }
 }

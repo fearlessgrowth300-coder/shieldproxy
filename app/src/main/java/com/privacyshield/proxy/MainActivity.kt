@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.privacyshield.proxy.core.AppList
+import com.privacyshield.proxy.core.BlackBoxBridge
 import com.privacyshield.proxy.core.Profile
 import com.privacyshield.proxy.core.ProfileStore
 import com.privacyshield.proxy.core.ProxyLibrary
@@ -123,6 +124,7 @@ class MainActivity : AppCompatActivity() {
         try {
             ProfileStore.load(this)
             ProxyLibrary.load(this)
+            ProxyLibrary.reconcileProfiles(this)
             RoutingConfig.load(this)
             File(filesDir, "mihomo/config.yaml").delete()
         } catch (_: Exception) {
@@ -339,12 +341,40 @@ class MainActivity : AppCompatActivity() {
                                 h.itemView.postDelayed({ refresh() }, 600)
                             }
                             3 -> enableKeepAlive(p)
-                            else -> { ProfileStore.delete(this@MainActivity, p.id); refresh() }
+                            else -> deleteProfileAndRoutes(p)
                         }
                     }.show()
                 true
             }
         }
+    }
+
+    private fun deleteProfileAndRoutes(profile: Profile) {
+        val errors = profile.config.bbMap.keys.mapNotNull { tag ->
+            val parts = tag.split(":", limit = 4)
+            val authority = parts.getOrNull(1)
+            val userId = parts.getOrNull(2)?.toIntOrNull()
+            val pkg = parts.getOrNull(3)
+            if (authority == null || userId == null || pkg == null) {
+                AppList.labelFor(this, tag)
+            } else {
+                val result = BlackBoxBridge.clearCloneProxy(this, authority, userId, pkg)
+                if (result.ok) {
+                    ProxyGuardService.disarm(this, tag)
+                    null
+                } else AppList.labelFor(this, tag)
+            }
+        }
+        if (errors.isNotEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("Could not remove proxy")
+                .setMessage("BlackBox did not clear: ${errors.joinToString()}. The list was kept so its route cannot become hidden.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        ProfileStore.delete(this, profile.id)
+        refresh()
     }
 
     private class VH(v: View) : RecyclerView.ViewHolder(v) {

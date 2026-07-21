@@ -42,6 +42,8 @@ class ProxyEditActivity : AppCompatActivity() {
 
     @Volatile private var lastIp = ""
     @Volatile private var lastCity = ""
+    private var originalNode: ProxyNode? = null
+    @Volatile private var testedNode: ProxyNode? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,6 +75,7 @@ class ProxyEditActivity : AppCompatActivity() {
         val sp = ProxyLibrary.load(this).firstOrNull { it.node.name == editName } ?: return
         title = "Edit proxy"
         val n = sp.node
+        originalNode = n
         lastIp = sp.lastIp; lastCity = sp.lastCity
         name.setText(n.name)
         name.isEnabled = false // name is the key; rename from the library screen
@@ -153,15 +156,17 @@ class ProxyEditActivity : AppCompatActivity() {
                 when {
                     r.ok && r.reachableOnly -> {
                         lastIp = ""; lastCity = ""
+                        testedNode = node
                         status.text = "✓ ${node.type.uppercase()} server reachable — start the list, then Check IP for the exit IP"
                     }
                     r.ok -> {
                         lastIp = r.ip; lastCity = r.city
+                        testedNode = node
                         status.text = "✓ Works — exit ${r.ip}" +
                                 (if (r.city.isNotBlank()) " (${r.city})" else "") +
                                 (if (r.type.isNotBlank()) "\n${r.type}" else "")
                     }
-                    else -> { lastIp = ""; lastCity = ""; status.text = "✗ Failed: ${r.error}" }
+                    else -> { lastIp = ""; lastCity = ""; testedNode = null; status.text = "✗ Failed: ${r.error}" }
                 }
             }
         }.start()
@@ -170,7 +175,11 @@ class ProxyEditActivity : AppCompatActivity() {
     private fun save() {
         val node = currentNode()
         if (!node.isValid()) { status.text = "Enter host + port first"; return }
-        ProxyLibrary.upsert(this, SavedProxy(node, lastIp, lastCity))
+        val resultStillMatches = node == originalNode || node == testedNode
+        ProxyLibrary.upsert(
+            this,
+            SavedProxy(node, if (resultStillMatches) lastIp else "", if (resultStillMatches) lastCity else "")
+        )
         setResult(Activity.RESULT_OK, Intent().putExtra(EXTRA_NAME, node.name))
         finish()
     }

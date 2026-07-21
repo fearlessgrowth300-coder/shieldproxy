@@ -200,7 +200,10 @@ class ProfileEditActivity : AppCompatActivity() {
             cfg.finalTarget = node.name   // route everything through it
         } else {
             val valid = routes.filter { it.proxy != null && it.apps.isNotEmpty() }
-            if (valid.isEmpty()) { toast("Add a proxy and pick its apps"); return }
+            if (valid.isEmpty()) {
+                if (!clearAndDeleteEmptyProfile()) toast("Add a proxy and pick its apps")
+                return
+            }
             // Isolation checks (duplicate clone / IG-WA per user / shared-GMS one-proxy) run first;
             // they may prompt before the actual save happens in commitPerApp().
             validateThenCommit(name, valid)
@@ -211,6 +214,41 @@ class ProfileEditActivity : AppCompatActivity() {
         ProfileStore.upsert(this, Profile(id, name, cfg))
         toast("Saved ✓")
         finish()
+    }
+
+    /** Removing the last route means "use the real phone network". Clear BlackBox first so an
+     * invisible encrypted assignment cannot survive after the ShieldProxy card disappears. */
+    private fun clearAndDeleteEmptyProfile(): Boolean {
+        val id = profileId ?: return false
+        val profile = ProfileStore.get(this, id) ?: return false
+        val errors = profile.config.bbMap.keys.mapNotNull { tag ->
+            val parts = tag.split(":", limit = 4)
+            val authority = parts.getOrNull(1)
+            val userId = parts.getOrNull(2)?.toIntOrNull()
+            val pkg = parts.getOrNull(3)
+            if (authority == null || userId == null || pkg == null) {
+                "${AppList.labelFor(this, tag)}: invalid clone identifier"
+            } else {
+                val result = com.privacyshield.proxy.core.BlackBoxBridge.clearCloneProxy(
+                    this, authority, userId, pkg
+                )
+                if (result.ok) {
+                    ProxyGuardService.disarm(this, tag)
+                    null
+                } else {
+                    "${AppList.labelFor(this, tag)}: " +
+                        result.error.ifBlank { result.state.ifBlank { "BlackBox could not clear the route" } }
+                }
+            }
+        }
+        if (errors.isNotEmpty()) {
+            showSaveFailure("Proxy not removed", errors)
+            return true
+        }
+        ProfileStore.delete(this, id)
+        toast("Proxy removed — this clone now uses the phone network")
+        finish()
+        return true
     }
 
     /** Run the isolation rules; commit immediately if clean, else require move/correction. */
