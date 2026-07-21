@@ -45,7 +45,8 @@ class ProxyGuardService : Service() {
     class Armed(
         @Volatile var node: ProxyNode,
         val tag: String, val auth: String, val userId: Int, val pkg: String, val label: String,
-        val routeId: String, val expectedExitIp: String
+        @Volatile var routeId: String, val expectedExitIp: String,
+        @Volatile var countryIso: String = ""
     ) {
         @Volatile var strikes = 0
         @Volatile var state = "checking"     // checking | connected | down | recovering
@@ -55,6 +56,7 @@ class ProxyGuardService : Service() {
         @Volatile var aliveSince = 0L        // elapsedRealtime of first OK (session-age readout)
         @Volatile var nextTestAt = 0L        // elapsedRealtime target -> live countdown
         @Volatile var lastRouteCheckAt = 0L
+        @Volatile var routeProbeStrikes = 0  // endpoint outages are not route-identity failures
         @Volatile var testing = false
     }
 
@@ -94,9 +96,10 @@ class ProxyGuardService : Service() {
                         val label = intent.getStringExtra("label") ?: pkg ?: tag
                         val routeId = intent.getStringExtra("routeId").orEmpty()
                         val expectedExitIp = intent.getStringExtra("expectedExitIp").orEmpty()
+                        val countryIso = intent.getStringExtra("countryIso").orEmpty().lowercase()
                         if (auth != null && uid != null && pkg != null
                             && routeId.isNotBlank() && expectedExitIp.isNotBlank()) {
-                            val a = Armed(node, tag, auth, uid, pkg, label, routeId, expectedExitIp)
+                            val a = Armed(node, tag, auth, uid, pkg, label, routeId, expectedExitIp, countryIso)
                             a.state = "connected"           // pre-flight already confirmed it
                             a.aliveSince = SystemClock.elapsedRealtime()
                             a.lastRouteCheckAt = SystemClock.elapsedRealtime()
@@ -169,7 +172,8 @@ class ProxyGuardService : Service() {
                 if (tag != expectedTag || !node.isValid() || routeId.isBlank() || expectedExitIp.isBlank()) {
                     continue
                 }
-                val armed = Armed(node, tag, auth, userId, pkg, label, routeId, expectedExitIp).apply {
+                val countryIso = item.optString("countryIso", "").lowercase()
+                val armed = Armed(node, tag, auth, userId, pkg, label, routeId, expectedExitIp, countryIso).apply {
                     state = "checking"
                     aliveSince = now
                     nextTestAt = now
@@ -208,6 +212,7 @@ class ProxyGuardService : Service() {
                 put("label", armed.label)
                 put("routeId", armed.routeId)
                 put("expectedExitIp", armed.expectedExitIp)
+                put("countryIso", armed.countryIso)
             })
         }
         SecureFileStore.writeText(this, STATE_FILE, array.toString())
@@ -247,9 +252,29 @@ class ProxyGuardService : Service() {
             a.testing = true
             try {
                 checks.execute {
-                val r = ProxyTester.test(a.node, lookupMetadata = false)
+                val r = ProxyTester.test(a.node, lookupMetadata = a.countryIso.isBlank())
                 a.nextTestAt = SystemClock.elapsedRealtime() + POLL_SECS * 1000L
                 if (r.ok) {
+                    if (a.countryIso.isBlank() && r.countryIso.isNotBlank()) {
+                        // Guard records created before country binding did not carry the verified
+                        // exit country. Upgrade the encrypted BlackBox assignment before allowing
+                        // another long-running session, so WhatsApp/Instagram no longer inherit
+                        // the physical phone's SIM country. setCloneProxy intentionally closes an
+                        // already-running clone; the user reopens it with the corrected identity.
+                        val migrated = BlackBoxBridge.setCloneProxy(
+                            this, a.auth, a.userId, a.pkg, a.node, r.countryIso
+                        )
+                        if (migrated.ok && migrated.routeId.isNotBlank()) {
+                            a.routeId = migrated.routeId
+                            a.countryIso = r.countryIso.lowercase()
+                            a.lastRouteCheckAt = 0L
+                            persistArmedState()
+                            alert(a, "${a.label} - proxy country updated to ${a.countryIso.uppercase()}. Re-open the app.")
+                            a.testing = false
+                            ui.post { updateNotif() }
+                            return@execute
+                        }
+                    }
                     // A healthy node is not enough: prove the exact running clone still holds the
                     // assignment we armed, has a real proxied exit, and retains DNS/UDP guards.
                     // Mobile/residential nodes may legitimately rotate exit IP inside one session,
@@ -261,10 +286,22 @@ class ProxyGuardService : Service() {
                         )
                         a.lastRouteCheckAt = SystemClock.elapsedRealtime()
                         if (!route.ok || route.routeId != a.routeId || route.exitIp.isBlank()) {
-                            onRouteViolation(a, route.state.ifBlank { route.error.ifBlank { "route mismatch" } })
-                            a.testing = false
-                            ui.post { updateNotif() }
-                            return@execute
+                            val endpointOnlyFailure = route.state == "EXIT_CHECK_FAILED" &&
+                                route.routeId == a.routeId
+                            if (endpointOnlyFailure && ++a.routeProbeStrikes < ROUTE_PROBE_STRIKES) {
+                                // The independently tested proxy is reachable and the native route
+                                // identity still matches. One third-party IP-check timeout is not a
+                                // confirmed leak or proxy failure, so keep the fail-closed tunnel and
+                                // verify again on the next pass instead of killing a healthy clone.
+                                a.lastRouteCheckAt = 0L
+                            } else {
+                                onRouteViolation(a, route.state.ifBlank { route.error.ifBlank { "route mismatch" } })
+                                a.testing = false
+                                ui.post { updateNotif() }
+                                return@execute
+                            }
+                        } else {
+                            a.routeProbeStrikes = 0
                         }
                     }
                     val wasBad = a.state == "down" || a.state == "recovering"
@@ -413,6 +450,7 @@ class ProxyGuardService : Service() {
         private const val POLL_SECS = 60          // proxy re-test cadence while an app is open
         private const val ROUTE_VERIFY_SECS = 60  // heavier in-guest exit/guard proof
         private const val FAIL_STRIKES = 1        // first confirmed failure closes the clone
+        private const val ROUTE_PROBE_STRIKES = 2 // one IP-check vendor timeout is not confirmation
         private const val STATE_FILE = "proxy_guard_state.sec"
         private const val FG_ID = 4801
         private const val CHANNEL = "proxy_guard"
@@ -427,12 +465,13 @@ class ProxyGuardService : Service() {
 
         fun arm(
             ctx: Context, tag: String, node: ProxyNode, label: String,
-            routeId: String, expectedExitIp: String
+            routeId: String, expectedExitIp: String, countryIso: String = ""
         ) {
             ARMED_LAST[tag] = Armed(node, tag,
                 tag.split(":", limit = 4).getOrNull(1) ?: "",
                 tag.split(":", limit = 4).getOrNull(2)?.toIntOrNull() ?: -1,
-                tag.split(":", limit = 4).getOrNull(3) ?: "", label, routeId, expectedExitIp)
+                tag.split(":", limit = 4).getOrNull(3) ?: "", label, routeId, expectedExitIp,
+                countryIso.lowercase())
             val i = Intent(ctx, ProxyGuardService::class.java)
                 .setAction(ACTION_ARM)
                 .putExtra("tag", tag)
@@ -440,6 +479,7 @@ class ProxyGuardService : Service() {
                 .putExtra("node", node.toJson().toString())
                 .putExtra("routeId", routeId)
                 .putExtra("expectedExitIp", expectedExitIp)
+                .putExtra("countryIso", countryIso.lowercase())
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i) else ctx.startService(i)
         }
 

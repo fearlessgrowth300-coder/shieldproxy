@@ -19,8 +19,11 @@ object ProxyTester {
 
     data class Result(
         val ok: Boolean, val ip: String = "", val city: String = "",
-        val type: String = "", val error: String = "", val reachableOnly: Boolean = false
+        val type: String = "", val countryIso: String = "",
+        val error: String = "", val reachableOnly: Boolean = false
     )
+
+    private data class Metadata(val city: String = "", val type: String = "", val countryIso: String = "")
 
     private const val HOST = "api.ipify.org"
     private const val PORT = 443
@@ -70,8 +73,11 @@ object ProxyTester {
             if (ip.isEmpty() || !ip.matches(Regex("^[0-9a-fA-F:.]+$"))) {
                 return Result(false, error = "no IP returned")
             }
-            val info = if (lookupMetadata) lookupInfo(node, ip) else Pair("", "")
-            return Result(true, ip = ip, city = info.first, type = info.second)
+            val info = if (lookupMetadata) lookupInfo(node, ip) else Metadata()
+            return Result(
+                true, ip = ip, city = info.city, type = info.type,
+                countryIso = info.countryIso.ifBlank { node.countryIsoHint() }
+            )
         } catch (e: Exception) {
             return Result(false, error = e.message ?: e.javaClass.simpleName)
         } finally {
@@ -174,7 +180,7 @@ object ProxyTester {
      *  which exposes mobile/proxy/hosting flags. For multi-accounting: Mobile = strongest,
      *  Residential = good, Datacenter/Flagged = easily detected & banned — avoid. Returns
      *  Pair(city, type). */
-    private fun lookupInfo(node: ProxyNode, ip: String): Pair<String, String> {
+    private fun lookupInfo(node: ProxyNode, ip: String): Metadata {
         var socket: Socket? = null
         return try {
             val metadataHost = "ip-api.com"
@@ -190,15 +196,16 @@ object ProxyTester {
             } else {
                 socks5Connect(out, inp, node, metadataHost, metadataPort)
             }
-            val path = "/json/$ip?fields=status,city,mobile,proxy,hosting,isp"
+            val path = "/json/$ip?fields=status,city,countryCode,mobile,proxy,hosting,isp"
             out.write(
                 ("GET $path HTTP/1.1\r\nHost: $metadataHost\r\n" +
                     "User-Agent: ShieldProxy\r\nConnection: close\r\n\r\n").toByteArray()
             )
             out.flush()
             val o = org.json.JSONObject(readHttpBody(inp))
-            if (o.optString("status") != "success") return Pair("", "")
+            if (o.optString("status") != "success") return Metadata()
             val city = o.optString("city", "")
+            val countryIso = o.optString("countryCode", "").lowercase()
             val mobile = o.optBoolean("mobile", false)
             val proxy = o.optBoolean("proxy", false)
             val hosting = o.optBoolean("hosting", false)
@@ -208,9 +215,9 @@ object ProxyTester {
                 proxy -> "⚠ Flagged"
                 else -> "🏠 Residential"
             }
-            Pair(city, type)
+            Metadata(city, type, countryIso)
         } catch (_: Exception) {
-            Pair("", "")
+            Metadata()
         } finally {
             try { socket?.close() } catch (_: Exception) {}
         }

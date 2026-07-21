@@ -54,6 +54,12 @@ data class ProxyNode(
     /** True if this proxy uses a rotatable sticky session we can refresh. */
     fun hasRotatableSession(): Boolean = sessionId() != null
 
+    /** Country embedded by providers such as SOAX (`country-us`). Used only as a fallback when
+     * the live exit-IP metadata service cannot return a country. */
+    fun countryIsoHint(): String = Regex("(?:^|[-_])country[-_]?([A-Za-z]{2})(?:[-_]|$)")
+        .find(username)?.groupValues?.get(1)?.lowercase()
+        ?.let { if (it == "uk") "gb" else it }.orEmpty()
+
     /** Copy with the `sessionid-XXXX` token swapped for [newId] → a brand-new
      *  sticky session (new exit IP) without waiting for the dead one to expire. */
     fun withNewSession(newId: String): ProxyNode =

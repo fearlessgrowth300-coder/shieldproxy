@@ -154,12 +154,14 @@ object BlackBoxBridge {
      * cannot keep using stale credentials. The returned routeId is safe to display/store and
      * binds the later guest-process verification to this assignment. */
     fun setCloneProxy(
-        ctx: Context, authority: String, userId: Int, pkg: String, node: ProxyNode
+        ctx: Context, authority: String, userId: Int, pkg: String, node: ProxyNode,
+        verifiedCountryIso: String = ""
     ): BbProxyAssignment = try {
         val extras = android.os.Bundle().apply {
             putInt("userId", userId); putString("pkg", pkg)
             putString("type", node.type); putString("server", node.server); putInt("port", node.port)
             putString("username", node.username); putString("password", node.password)
+            putString("countryIso", verifiedCountryIso.ifBlank { node.countryIsoHint() })
         }
         val r = ctx.contentResolver.call(baseFor(authority), "setProxy", null, extras)
         BbProxyAssignment(
@@ -199,6 +201,7 @@ object BlackBoxBridge {
             putInt("userId", userId); putString("pkg", pkg)
             putString("type", node.type); putString("server", node.server); putInt("port", node.port)
             putString("username", node.username); putString("password", node.password)
+            putString("countryIso", node.countryIsoHint())
         }
         val r = ctx.contentResolver.call(baseFor(authority), "canSetProxy", null, extras)
         BbProxyAssignment(
@@ -283,13 +286,14 @@ object BlackBoxBridge {
      * route, and compare its observed exit IP before returning success. */
     fun assignAndVerifyRoute(
         ctx: Context, authority: String, userId: Int, pkg: String,
-        node: ProxyNode, expectedExitIp: String
+        node: ProxyNode, expectedExitIp: String, verifiedCountryIso: String = ""
     ): BbRouteVerification = try {
         val extras = android.os.Bundle().apply {
             putInt("userId", userId); putString("pkg", pkg)
             putString("type", node.type); putString("server", node.server); putInt("port", node.port)
             putString("username", node.username); putString("password", node.password)
             putString("expectedExitIp", expectedExitIp)
+            putString("countryIso", verifiedCountryIso.ifBlank { node.countryIsoHint() })
         }
         val r = ctx.contentResolver.call(baseFor(authority), "assignAndVerifyRoute", null, extras)
         BbRouteVerification(

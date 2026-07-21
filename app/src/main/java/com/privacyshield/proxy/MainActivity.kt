@@ -683,7 +683,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val verified = com.privacyshield.proxy.core.BlackBoxBridge
-                .assignAndVerifyRoute(this, auth, uid, pkg, node, tested.ip)
+                .assignAndVerifyRoute(this, auth, uid, pkg, node, tested.ip, tested.countryIso)
             if (!verified.ok || verified.routeId.isBlank()
                 || verified.exitIp.isBlank()) {
                 com.privacyshield.proxy.core.BlackBoxBridge.stopClone(this, auth, uid, pkg)
@@ -698,7 +698,7 @@ class MainActivity : AppCompatActivity() {
                 if (startCloneActivity(auth, uid, pkg)) {
                     toast("Connected and isolated - ${tested.city.ifBlank { tested.ip }}")
                     ProxyGuardService.arm(
-                        this, tag, node, label, verified.routeId, verified.exitIp
+                        this, tag, node, label, verified.routeId, verified.exitIp, tested.countryIso
                     )
                 } else {
                     com.privacyshield.proxy.core.BlackBoxBridge.stopClone(this, auth, uid, pkg)
