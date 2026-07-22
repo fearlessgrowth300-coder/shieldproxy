@@ -105,13 +105,29 @@ class AuthActivity : AppCompatActivity() {
         if (!Supabase.hasStoredSession(this)) return
         // Already unlocked on this device → straight in, no network needed (works offline).
         // The session never expires; only an explicit Log out ends it.
-        if (VaultKeyStore.isReady(this)) { openMain(); return }
         // Stored session but the local key isn't set up yet (fresh install / new phone): fetch the
         // account key and restore data. NEVER log out on failure — just let the user retry.
         setBusy(true)
         status.setTextColor(Color.parseColor("#B9A6E0"))
-        status.text = "Preparing your account..."
+        status.text = "Checking your account..."
         Thread {
+            val valid = Supabase.validateStoredSession(this)
+            if (!valid) {
+                runOnUiThread {
+                    setBusy(false)
+                    status.setTextColor(Color.parseColor("#FFB74D"))
+                    if (Supabase.hasStoredSession(this)) {
+                        status.text = "Couldn't verify your account. Check your connection, then retry."
+                        primary.text = "Retry"
+                        primary.setOnClickListener { migrateExistingSession() }
+                    } else {
+                        status.text = "Your session expired. Enter your email to get a new 6-digit code."
+                        primary.text = "Send code"
+                        primary.setOnClickListener { onPrimary() }
+                    }
+                }
+                return@Thread
+            }
             try {
                 val email = Supabase.email(this) ?: error("Account email is missing")
                 provisionAccountKey(email)
@@ -201,7 +217,11 @@ class AuthActivity : AppCompatActivity() {
 
     private fun provisionAccountKey(email: String) {
         val candidates = Supabase.getBackupKeyCandidates(this)
-        if (!SecureFileStore.recoverCompatibleAccountKey(this, email, candidates)) {
+        val recovered = SecureFileStore.recoverCompatibleAccountKey(this, email, candidates)
+        if (!recovered && SecureFileStore.hasProtectedFiles(this)) {
+            error("None of the account recovery keys matched the protected proxy data")
+        }
+        if (!recovered && (!VaultKeyStore.isReady(this) || !VaultKeyStore.belongsTo(this, email))) {
             VaultKeyStore.provision(this, email, candidates.first())
         }
     }

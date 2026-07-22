@@ -42,7 +42,14 @@ object Supabase {
     // Persistent session: signed in as long as tokens are stored on this device. No expiry, no
     // freshness window, no auto-logout — only an explicit signOut() clears it. The refresh token
     // silently keeps API calls alive in the background.
-    fun isSignedIn(ctx: Context): Boolean = hasStoredSession(ctx)
+    /** Unlock only after this process has verified the stored session with GoTrue recently. */
+    fun isSignedIn(ctx: Context): Boolean {
+        if (!hasStoredSession(ctx) || !validatedThisProcess.get() || !tokenIsFresh(accessToken(ctx))) {
+            return false
+        }
+        val age = System.currentTimeMillis() - validatedAtMs.get()
+        return age in 0..VALIDATION_MAX_AGE_MS
+    }
     fun hasStoredSession(ctx: Context): Boolean =
         !accessToken(ctx).isNullOrBlank() && !refreshToken(ctx).isNullOrBlank()
     fun email(ctx: Context): String? = secret(ctx, "email")
@@ -134,8 +141,12 @@ object Supabase {
                 validatedAtMs.set(System.currentTimeMillis())
             } else clearLocalSession(ctx)
             valid
+        } catch (e: HttpError) {
+            // Definitive auth rejection: discard unusable credentials. Server/network failures
+            // leave the sealed session in place so the gate can offer a safe retry.
+            if (e.code == 401 || e.code == 403) clearLocalSession(ctx)
+            false
         } catch (_: Exception) {
-            clearLocalSession(ctx)
             false
         }
     }

@@ -18,6 +18,9 @@ object SecureFileStore {
 
     fun exists(ctx: Context, name: String): Boolean = file(ctx, name).isFile
 
+    fun hasProtectedFiles(ctx: Context): Boolean =
+        ctx.filesDir.listFiles().orEmpty().any(::isProtectedFile)
+
     fun readText(ctx: Context, name: String): String? {
         val target = file(ctx, name)
         if (!target.isFile) return null
@@ -39,14 +42,7 @@ object SecureFileStore {
         email: String,
         candidates: List<ByteArray>
     ): Boolean {
-        val protected = ctx.filesDir.listFiles().orEmpty().filter { candidate ->
-            candidate.isFile && candidate.length() >= MAGIC.size && runCatching {
-                candidate.inputStream().use { input ->
-                    val prefix = ByteArray(MAGIC.size)
-                    input.read(prefix) == prefix.size && prefix.contentEquals(MAGIC)
-                }
-            }.getOrDefault(false)
-        }
+        val protected = ctx.filesDir.listFiles().orEmpty().filter(::isProtectedFile)
         if (protected.isEmpty()) return false
         fun compatible(key: SecretKeySpec): Boolean = protected.all { file ->
             runCatching { decryptText(file.name, file.readBytes(), key) }.isSuccess
@@ -67,6 +63,14 @@ object SecureFileStore {
         Log.w("SecureFileStore", "Protected key recovery found no match; candidates=${candidates.size}; files=${protected.size}")
         return false
     }
+
+    private fun isProtectedFile(candidate: File): Boolean =
+        candidate.isFile && candidate.length() >= MAGIC.size && runCatching {
+            candidate.inputStream().use { input ->
+                val prefix = ByteArray(MAGIC.size)
+                input.read(prefix) == prefix.size && prefix.contentEquals(MAGIC)
+            }
+        }.getOrDefault(false)
 
     private fun decryptText(name: String, bytes: ByteArray, key: SecretKeySpec): String {
         DataInputStream(ByteArrayInputStream(bytes)).use { input ->

@@ -51,6 +51,9 @@ object VaultKeyStore {
 
     fun ownerHash(ctx: Context): String? = prefs(ctx).getString("owner", null)
 
+    fun belongsTo(ctx: Context, email: String): Boolean =
+        ownerHash(ctx) == ownerHash(email.trim().lowercase())
+
     fun clear(ctx: Context) {
         prefs(ctx).edit().clear().apply()
         runCatching {
