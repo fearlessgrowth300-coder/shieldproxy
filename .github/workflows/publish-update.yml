@@ -121,13 +121,12 @@ jobs:
       - name: Publish metadata only after the APK passed every check
         shell: bash
         env:
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: |
-          test -n "$SUPABASE_SERVICE_ROLE_KEY"
+          test -n "$SUPABASE_SECRET_KEY"
           curl --fail-with-body --silent --show-error --retry 3 \
             -X POST \
-            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
-            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "apikey: $SUPABASE_SECRET_KEY" \
             -H "Content-Type: application/json" \
             -H "x-upsert: true" \
             --data-binary @latest.json \
