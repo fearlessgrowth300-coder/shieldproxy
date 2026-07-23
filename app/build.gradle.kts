@@ -23,8 +23,8 @@ android {
         applicationId = "com.privacyshield.proxy"
         minSdk = 24
         targetSdk = 36
-        versionCode = 19
-        versionName = "9.1"
+        versionCode = 20
+        versionName = "9.2"
 
         ndk {
             // Match the ABIs the Mihomo .aar was built for (arm64/arm/x86_64).
