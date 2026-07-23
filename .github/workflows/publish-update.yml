@@ -7,6 +7,19 @@ on:
         description: Release notes shown in ShieldProxy
         required: true
         type: string
+      rollout_percent:
+        description: Percentage of rollout-capable installations offered this update
+        required: true
+        default: 100
+        type: number
+      channel:
+        description: Beta publishes a signed prerelease without notifying existing installations
+        required: true
+        default: beta
+        type: choice
+        options:
+          - beta
+          - stable
 
 permissions:
   contents: write
@@ -87,12 +100,16 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
           APK: ${{ steps.release.outputs.apk }}
           ASSET_NAME: ${{ steps.release.outputs.asset_name }}
+          CHANNEL: ${{ inputs.channel }}
         run: |
           printf '%s\n' "$NOTES" > "$RUNNER_TEMP/release-notes.txt"
+          EXTRA_ARGS=()
+          if [ "$CHANNEL" = "beta" ]; then EXTRA_ARGS+=(--prerelease); fi
           gh release create "$TAG" "$APK#$ASSET_NAME" \
             --target "$GITHUB_SHA" \
             --title "ShieldProxy ${{ steps.release.outputs.version_name }}" \
-            --notes-file "$RUNNER_TEMP/release-notes.txt"
+            --notes-file "$RUNNER_TEMP/release-notes.txt" \
+            "${EXTRA_ARGS[@]}"
 
       - name: Create checksum-pinned update metadata
         shell: bash
@@ -103,9 +120,13 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
           ASSET_NAME: ${{ steps.release.outputs.asset_name }}
           SHA256: ${{ steps.release.outputs.sha256 }}
+          ROLLOUT_PERCENT: ${{ inputs.rollout_percent }}
         run: |
           python3 - <<'PY'
           import json, os
+          rollout = int(os.environ["ROLLOUT_PERCENT"])
+          if not 0 <= rollout <= 100:
+              raise SystemExit("rollout_percent must be between 0 and 100")
           metadata = {
               "versionCode": int(os.environ["VERSION_CODE"]),
               "versionName": os.environ["VERSION_NAME"],
@@ -113,12 +134,22 @@ jobs:
               "apkUrl": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{os.environ['TAG']}/{os.environ['ASSET_NAME']}",
               "sha256": os.environ["SHA256"],
               "notes": os.environ["NOTES"],
+              "rolloutPercent": rollout,
           }
           with open("latest.json", "w", encoding="utf-8") as output:
               json.dump(metadata, output, ensure_ascii=False, separators=(",", ":"))
           PY
 
+      - name: Attach immutable update metadata to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          gh release upload "$TAG" "latest.json#ShieldProxy-update.json" --clobber
+
       - name: Publish metadata only after the APK passed every check
+        if: inputs.channel == 'stable'
         shell: bash
         env:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}

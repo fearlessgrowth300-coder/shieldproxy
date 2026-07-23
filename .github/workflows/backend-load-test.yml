@@ -1,0 +1,47 @@
+name: Controlled backend load test
+
+on:
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: Concurrent requests (maximum 25 in GitHub Actions)
+        required: true
+        default: 5
+        type: number
+      duration_seconds:
+        description: Test duration (maximum 60 seconds)
+        required: true
+        default: 20
+        type: number
+  schedule:
+    - cron: "11 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: controlled-backend-load-test
+  cancel-in-progress: false
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run bounded privacy-safe load
+        shell: bash
+        env:
+          SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9xeXJiZHZlaHZxZGNwZ2xhb2pvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQzODEzMDgsImV4cCI6MjA5OTk1NzMwOH0.BdkGNtzNkN1BV50FA2aA817SAAHvD_2hfAI1lU_bxOw
+          REQUESTED_CONCURRENCY: ${{ inputs.concurrency }}
+          REQUESTED_DURATION: ${{ inputs.duration_seconds }}
+        run: |
+          LOAD_CONCURRENCY="${REQUESTED_CONCURRENCY:-5}"
+          LOAD_DURATION_SECONDS="${REQUESTED_DURATION:-20}"
+          test "$LOAD_CONCURRENCY" -ge 1
+          test "$LOAD_CONCURRENCY" -le 25
+          test "$LOAD_DURATION_SECONDS" -ge 5
+          test "$LOAD_DURATION_SECONDS" -le 60
+          export LOAD_CONCURRENCY LOAD_DURATION_SECONDS
+          node tools/backend-load-test.mjs

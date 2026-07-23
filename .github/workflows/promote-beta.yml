@@ -1,0 +1,76 @@
+name: Promote ShieldProxy beta to stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact prerelease tag to promote
+        required: true
+        type: string
+      expected_version_code:
+        description: Exact version code expected in attached metadata
+        required: true
+        type: number
+      rollout_percent:
+        description: Initial rollout percentage (use 100 for the 9.0 baseline)
+        required: true
+        default: 100
+        type: number
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-shieldproxy-beta
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download and verify beta metadata and APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          EXPECTED_VERSION_CODE: ${{ inputs.expected_version_code }}
+          ROLLOUT_PERCENT: ${{ inputs.rollout_percent }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease' | grep -qx true
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern ShieldProxy-update.json
+          APK_URL="$(python3 - <<'PY'
+          import json, os
+          data = json.load(open("ShieldProxy-update.json"))
+          rollout = int(os.environ["ROLLOUT_PERCENT"])
+          assert 0 <= rollout <= 100
+          assert data["versionCode"] == int(os.environ["EXPECTED_VERSION_CODE"])
+          assert data["packageName"] == "com.privacyshield.proxy"
+          expected_prefix = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{os.environ['TAG']}/"
+          assert data["apkUrl"].startswith(expected_prefix)
+          assert len(data["sha256"]) == 64
+          data["rolloutPercent"] = rollout
+          json.dump(data, open("stable.json", "w"), ensure_ascii=False, separators=(",", ":"))
+          print(data["apkUrl"])
+          PY
+          )"
+          curl --fail-with-body --silent --show-error --retry 3 --location "$APK_URL" -o candidate.apk
+          EXPECTED_SHA="$(python3 -c 'import json; print(json.load(open("stable.json"))["sha256"])')"
+          echo "$EXPECTED_SHA  candidate.apk" | sha256sum --check
+
+      - name: Publish verified metadata and mark release stable
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          test -n "$SUPABASE_SECRET_KEY"
+          curl --fail-with-body --silent --show-error --retry 3 \
+            -X POST \
+            -H "apikey: $SUPABASE_SECRET_KEY" \
+            -H "Content-Type: application/json" \
+            -H "x-upsert: true" \
+            --data-binary @stable.json \
+            "https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/app-releases/shieldproxy/latest.json"
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
