@@ -1,0 +1,65 @@
+name: Promote ShieldProxy staged rollout
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_version_code:
+        description: Refuse to change metadata unless this exact version is current
+        required: true
+        type: number
+      rollout_percent:
+        description: New rollout percentage (0 pauses, 100 completes)
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-shieldproxy-rollout
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch, verify and promote existing metadata
+        shell: bash
+        env:
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          EXPECTED_VERSION_CODE: ${{ inputs.expected_version_code }}
+          ROLLOUT_PERCENT: ${{ inputs.rollout_percent }}
+          PUBLIC_URL: https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/public/app-releases/shieldproxy/latest.json
+          WRITE_URL: https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/app-releases/shieldproxy/latest.json
+        run: |
+          test -n "$SUPABASE_SECRET_KEY"
+          curl --fail-with-body --silent --show-error --retry 3 "$PUBLIC_URL" -o latest.json
+          python3 - <<'PY'
+          import json, os
+          expected = int(os.environ["EXPECTED_VERSION_CODE"])
+          rollout = int(os.environ["ROLLOUT_PERCENT"])
+          if not 0 <= rollout <= 100:
+              raise SystemExit("rollout_percent must be between 0 and 100")
+          with open("latest.json", encoding="utf-8") as source:
+              metadata = json.load(source)
+          if metadata.get("versionCode") != expected:
+              raise SystemExit("current metadata version does not match expected_version_code")
+          if metadata.get("packageName") != "com.privacyshield.proxy":
+              raise SystemExit("unexpected package in current metadata")
+          apk_url = metadata.get("apkUrl", "")
+          if not apk_url.startswith("https://github.com/fearlessgrowth300-coder/shieldproxy/releases/"):
+              raise SystemExit("unexpected APK origin")
+          metadata["rolloutPercent"] = rollout
+          with open("promoted.json", "w", encoding="utf-8") as output:
+              json.dump(metadata, output, ensure_ascii=False, separators=(",", ":"))
+          PY
+          curl --fail-with-body --silent --show-error --retry 3 \
+            -X POST \
+            -H "apikey: $SUPABASE_SECRET_KEY" \
+            -H "Content-Type: application/json" \
+            -H "x-upsert: true" \
+            --data-binary @promoted.json \
+            "$WRITE_URL"
+          curl --fail-with-body --silent --show-error --retry 3 "$PUBLIC_URL" -o verified.json
+          cmp promoted.json verified.json

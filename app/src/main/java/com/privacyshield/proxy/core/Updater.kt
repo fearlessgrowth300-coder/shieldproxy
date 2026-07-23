@@ -13,6 +13,7 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.UUID
 
 /** Downloads only a newer APK that is the expected package and is signed by this installed app. */
 object Updater {
@@ -28,7 +29,8 @@ object Updater {
         val packageName: String,
         val apkUrl: String,
         val sha256: String,
-        val notes: String
+        val notes: String,
+        val rolloutPercent: Int
     )
 
     fun check(ctx: Context): Release? {
@@ -40,7 +42,8 @@ object Updater {
             o.optString("packageName"),
             o.optString("apkUrl"),
             o.optString("sha256"),
-            o.optString("notes").take(4000)
+            o.optString("notes").take(4000),
+            if (o.has("rolloutPercent")) o.optInt("rolloutPercent").coerceIn(0, 100) else 100
         )
         val secureUrl = runCatching {
             URL(release.apkUrl).protocol.equals("https", ignoreCase = true)
@@ -49,8 +52,32 @@ object Updater {
             && release.packageName == ctx.packageName
             && secureUrl
             && SHA256.matches(release.sha256)
+            && isEligibleForRollout(ctx, release.versionCode, release.rolloutPercent)
         ) release else null
     }
+
+    private fun isEligibleForRollout(ctx: Context, versionCode: Int, percent: Int): Boolean {
+        if (percent <= 0) return false
+        if (percent >= 100) return true
+        val prefs = ctx.getSharedPreferences("verified_updater", Context.MODE_PRIVATE)
+        val installId = prefs.getString("install_id", null) ?: UUID.randomUUID().toString().also {
+            prefs.edit().putString("install_id", it).commit()
+        }
+        return isBucketEligible(installId, ctx.packageName, versionCode, percent)
+    }
+
+    /** Stable, privacy-local cohort. The identifier never leaves the phone. */
+    internal fun rolloutBucket(installId: String, packageName: String, versionCode: Int): Int {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest("$installId:$packageName:$versionCode".toByteArray(Charsets.UTF_8))
+        return (((digest[0].toInt() and 0xff) shl 8) or
+            (digest[1].toInt() and 0xff)) % 100
+    }
+
+    internal fun isBucketEligible(
+        installId: String, packageName: String, versionCode: Int, percent: Int
+    ): Boolean = percent >= 100 ||
+        (percent > 0 && rolloutBucket(installId, packageName, versionCode) < percent)
 
     fun checkAsync(ctx: Context, onFound: (Release) -> Unit) {
         val app = ctx.applicationContext

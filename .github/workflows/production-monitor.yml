@@ -1,0 +1,93 @@
+name: ShieldProxy production monitor
+
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: shieldproxy-production-monitor
+  cancel-in-progress: true
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify auth, metadata, release asset and anonymous RLS
+        shell: bash
+        env:
+          ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9xeXJiZHZlaHZxZGNwZ2xhb2pvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQzODEzMDgsImV4cCI6MjA5OTk1NzMwOH0.BdkGNtzNkN1BV50FA2aA817SAAHvD_2hfAI1lU_bxOw
+          BASE: https://oqyrbdvehvqdcpglaojo.supabase.co
+          METADATA: https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/public/app-releases/shieldproxy/latest.json
+        run: |
+          AUTH=(-H "apikey: $ANON_KEY" -H "Authorization: Bearer $ANON_KEY")
+          curl --fail-with-body --silent --show-error --retry 3 "${AUTH[@]}" "$BASE/auth/v1/health" -o health.json
+          python3 -c 'import json; assert json.load(open("health.json"))["name"] == "GoTrue"'
+          curl --fail-with-body --silent --show-error --retry 3 "$METADATA" -o latest.json
+          APK_URL="$(python3 - <<'PY'
+          import json
+          data = json.load(open("latest.json"))
+          assert data["packageName"] == "com.privacyshield.proxy"
+          assert isinstance(data["versionCode"], int) and data["versionCode"] > 0
+          assert 0 <= int(data.get("rolloutPercent", 100)) <= 100
+          assert len(data["sha256"]) == 64
+          assert data["apkUrl"].startswith("https://github.com/fearlessgrowth300-coder/shieldproxy/releases/")
+          print(data["apkUrl"])
+          PY
+          )"
+          curl --fail --silent --show-error --retry 3 --location --head "$APK_URL" -o /dev/null
+          BACKUPS="$(curl --fail-with-body --silent --show-error --retry 3 \
+            "${AUTH[@]}" "$BASE/rest/v1/app_backups?select=user_id&limit=1")"
+          REPORTS="$(curl --fail-with-body --silent --show-error --retry 3 \
+            "${AUTH[@]}" "$BASE/rest/v1/crash_reports?select=id&limit=1")"
+          test "$BACKUPS" = "[]"
+          test "$REPORTS" = "[]"
+
+      - name: Check aggregate crash volume without downloading reports
+        shell: bash
+        env:
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          BASE: https://oqyrbdvehvqdcpglaojo.supabase.co
+        run: |
+          test -n "$SUPABASE_SECRET_KEY"
+          SINCE="$(date -u -d '30 minutes ago' '+%Y-%m-%dT%H:%M:%SZ')"
+          curl --fail-with-body --silent --show-error --retry 3 \
+            -D headers.txt -o /dev/null \
+            -H "apikey: $SUPABASE_SECRET_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SECRET_KEY" \
+            -H "Prefer: count=exact" \
+            -H "Range: 0-0" \
+            "$BASE/rest/v1/crash_reports?select=id&app=eq.shieldproxy&created_at=gte.$SINCE"
+          COUNT="$(tr -d '\r' < headers.txt | awk -F/ 'tolower($1) ~ /^content-range:/ {print $2}' | tail -1)"
+          test -n "$COUNT"
+          echo "shieldproxy_crash_reports_30m=$COUNT"
+          test "$COUNT" -le 1000
+
+      - name: Open one alert issue on failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="Production monitor alert"
+          EXISTING="$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')"
+          if [ -z "$EXISTING" ]; then
+            gh issue create --title "$TITLE" \
+              --body "The scheduled auth, update metadata, APK availability, or RLS monitor failed. Inspect workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
+
+      - name: Close recovered alert
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue list --state open --search "Production monitor alert in:title" \
+            --json number --jq '.[].number' | while read -r issue; do
+              gh issue close "$issue" --comment "Automated production checks recovered in run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+            done
