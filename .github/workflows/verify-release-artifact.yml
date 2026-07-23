@@ -1,0 +1,61 @@
+name: Verify published ShieldProxy artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing ShieldProxy release tag to verify
+        required: true
+        default: shieldproxy-18
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Download the published APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'ShieldProxy-*.apk' \
+            --dir "$RUNNER_TEMP/release"
+
+      - name: Verify digest, signer, and supported ABIs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          EXPECTED_CERT_SHA256: 74f3a0ad442ecf6d37e03868cb2650e8af367e4cd35fc6222190308b43a7f479
+        run: |
+          mapfile -t APKS < <(find "$RUNNER_TEMP/release" -maxdepth 1 -type f -name 'ShieldProxy-*.apk')
+          test "${#APKS[@]}" -eq 1
+          APK="${APKS[0]}"
+
+          ASSET_NAME="$(basename "$APK")"
+          REMOTE_DIGEST="$(gh api \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            --jq ".assets[] | select(.name == \"$ASSET_NAME\") | .digest")"
+          LOCAL_DIGEST="sha256:$(sha256sum "$APK" | cut -d' ' -f1)"
+          test -n "$REMOTE_DIGEST"
+          test "$LOCAL_DIGEST" = "$REMOTE_DIGEST"
+
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          VERIFY_OUTPUT="$("$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK" 2>&1)"
+          printf '%s\n' "$VERIFY_OUTPUT"
+          grep -qi "certificate SHA-256 digest: $EXPECTED_CERT_SHA256" <<<"$VERIFY_OUTPUT"
+
+          unzip -Z1 "$APK" | grep -q '^lib/arm64-v8a/'
+          unzip -Z1 "$APK" | grep -q '^lib/armeabi-v7a/'
