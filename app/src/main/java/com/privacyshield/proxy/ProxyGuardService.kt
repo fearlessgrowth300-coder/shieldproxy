@@ -14,6 +14,7 @@ import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.privacyshield.proxy.core.BlackBoxBridge
+import com.privacyshield.proxy.core.ProfileStore
 import com.privacyshield.proxy.core.ProxyNode
 import com.privacyshield.proxy.core.ProxyTester
 import com.privacyshield.proxy.core.SecureFileStore
@@ -145,6 +146,12 @@ class ProxyGuardService : Service() {
         ARMED.clear()
         ARMED_LAST.clear()
         if (!SecureFileStore.exists(this, STATE_FILE)) return
+        val claimedTags = runCatching {
+            ProfileStore.load(this).flatMapTo(HashSet()) { it.config.bbMap.keys }
+        }.getOrElse {
+            failClosedGuardRestore(it)
+            return
+        }
         val encoded = runCatching { SecureFileStore.readText(this, STATE_FILE) }.getOrElse {
             failClosedGuardRestore(it)
             return
@@ -166,6 +173,10 @@ class ProxyGuardService : Service() {
                 if (tag != expectedTag || !node.isValid() || routeId.isBlank() || expectedExitIp.isBlank()) {
                     continue
                 }
+                // A monitor is meaningful only while the clone is still claimed by a saved list.
+                // Profile edits and cloud restores can otherwise resurrect an old monitor for a
+                // moved/deleted assignment and make it appear that the wrong clone was closed.
+                if (tag !in claimedTags) continue
                 val countryIso = item.optString("countryIso", "").lowercase()
                 val armed = Armed(node, tag, auth, userId, pkg, label, routeId, expectedExitIp, countryIso).apply {
                     state = "checking"
@@ -176,6 +187,7 @@ class ProxyGuardService : Service() {
                 ARMED[tag] = armed
                 ARMED_LAST[tag] = armed
             }
+            persistArmedState()
         }.onFailure {
             ARMED.clear()
             ARMED_LAST.clear()
@@ -273,7 +285,11 @@ class ProxyGuardService : Service() {
                                 // verify again on the next pass instead of killing a healthy clone.
                                 a.lastRouteCheckAt = 0L
                             } else {
-                                onRouteViolation(a, route.state.ifBlank { route.error.ifBlank { "route mismatch" } })
+                                val reason = listOf(route.state, route.error)
+                                    .filter { it.isNotBlank() }
+                                    .joinToString(": ")
+                                    .ifBlank { "route mismatch" }
+                                onRouteViolation(a, reason)
                                 a.testing = false
                                 ui.post { updateNotif() }
                                 return@execute
@@ -322,6 +338,10 @@ class ProxyGuardService : Service() {
     }
 
     private fun onRouteViolation(a: Armed, reason: String) {
+        android.util.Log.e(
+            "ProxyGuardService",
+            "route violation tag=${a.tag} expectedRoute=${a.routeId} reason=$reason"
+        )
         BlackBoxBridge.stopClone(this, a.auth, a.userId, a.pkg)
         ARMED.remove(a.tag)
         ARMED_LAST.remove(a.tag)

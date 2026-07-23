@@ -370,6 +370,10 @@ class ProfileEditActivity : AppCompatActivity() {
             )
             return
         }
+        // setProxy stops the old guest process. Its old monitor must stop with it; otherwise a
+        // later guard tick can report/close this tag using the previous route ID even though the
+        // newly saved assignment has not been launched yet.
+        pendingClones.forEach { ProxyGuardService.disarm(this, it.tag) }
 
         // New assignments are live and verified by BlackBox. Now remove clone routes that this
         // edit deleted or moved to another virtual user. Without this phase, the old encrypted
@@ -387,7 +391,10 @@ class ProfileEditActivity : AppCompatActivity() {
             val result = com.privacyshield.proxy.core.BlackBoxBridge.clearCloneProxy(
                 this, pending.authority, pending.userId, pending.pkg
             )
-            if (result.ok) null else "${AppList.labelFor(this, pending.tag)}: " +
+            if (result.ok) {
+                ProxyGuardService.disarm(this, pending.tag)
+                null
+            } else "${AppList.labelFor(this, pending.tag)}: " +
                 result.error.ifBlank { result.state.ifBlank { "BlackBox could not clear the old assignment" } }
         }
         if (clearErrors.isNotEmpty()) {
@@ -421,7 +428,10 @@ class ProfileEditActivity : AppCompatActivity() {
                         val result = com.privacyshield.proxy.core.BlackBoxBridge.clearCloneProxy(
                             this, route.authority, route.userId, route.pkg
                         )
-                        if (result.ok) null else "${AppList.labelFor(this, route.tag)}: " +
+                        if (result.ok) {
+                            ProxyGuardService.disarm(this, route.tag)
+                            null
+                        } else "${AppList.labelFor(this, route.tag)}: " +
                             result.error.ifBlank { result.state.ifBlank { "BlackBox could not clear the route" } }
                     }
                     if (errors.isNotEmpty()) {
