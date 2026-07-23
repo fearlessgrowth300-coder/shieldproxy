@@ -75,9 +75,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TITLE="Production monitor alert"
-          EXISTING="$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')"
+          EXISTING="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "$TITLE in:title" --json number --jq '.[0].number // empty')"
           if [ -z "$EXISTING" ]; then
-            gh issue create --title "$TITLE" \
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
               --body "The scheduled auth, update metadata, APK availability, or RLS monitor failed. Inspect workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           fi
 
@@ -87,7 +88,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh issue list --state open --search "Production monitor alert in:title" \
+          gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "Production monitor alert in:title" \
             --json number --jq '.[].number' | while read -r issue; do
-              gh issue close "$issue" --comment "Automated production checks recovered in run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+              gh issue close "$issue" --repo "$GITHUB_REPOSITORY" \
+                --comment "Automated production checks recovered in run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
             done
