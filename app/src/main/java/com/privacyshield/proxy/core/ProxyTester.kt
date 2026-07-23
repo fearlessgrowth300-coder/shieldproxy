@@ -19,11 +19,17 @@ object ProxyTester {
 
     data class Result(
         val ok: Boolean, val ip: String = "", val city: String = "",
-        val type: String = "", val countryIso: String = "",
+        val region: String = "", val type: String = "", val countryIso: String = "",
+        val latitude: Double? = null, val longitude: Double? = null,
+        val timezoneId: String = "", val geoVerified: Boolean = false,
         val error: String = "", val reachableOnly: Boolean = false
     )
 
-    private data class Metadata(val city: String = "", val type: String = "", val countryIso: String = "")
+    internal data class Metadata(
+        val city: String = "", val region: String = "", val type: String = "",
+        val countryIso: String = "", val latitude: Double? = null,
+        val longitude: Double? = null, val timezoneId: String = ""
+    )
 
     private const val HOST = "api.ipify.org"
     private const val PORT = 443
@@ -76,7 +82,12 @@ object ProxyTester {
             val info = if (lookupMetadata) lookupInfo(node, ip) else Metadata()
             return Result(
                 true, ip = ip, city = info.city, type = info.type,
-                countryIso = info.countryIso.ifBlank { node.countryIsoHint() }
+                region = info.region,
+                countryIso = info.countryIso.ifBlank { node.countryIsoHint() },
+                latitude = info.latitude, longitude = info.longitude,
+                timezoneId = info.timezoneId,
+                geoVerified = info.countryIso.isNotBlank() && info.latitude != null &&
+                    info.longitude != null && info.timezoneId.isNotBlank()
             )
         } catch (e: Exception) {
             return Result(false, error = e.message ?: e.javaClass.simpleName)
@@ -176,15 +187,12 @@ object ProxyTester {
         return reader.readText()
     }
 
-    /** Best-effort city + connection-TYPE lookup through the same proxy via ip-api.com,
-     *  which exposes mobile/proxy/hosting flags. For multi-accounting: Mobile = strongest,
-     *  Residential = good, Datacenter/Flagged = easily detected & banned — avoid. Returns
-     *  Pair(city, type). */
+    /** Resolve the verified exit IP's geographic profile through the same proxy over TLS. */
     private fun lookupInfo(node: ProxyNode, ip: String): Metadata {
         var socket: Socket? = null
         return try {
-            val metadataHost = "ip-api.com"
-            val metadataPort = 80
+            val metadataHost = "ipwho.is"
+            val metadataPort = 443
             socket = Socket().apply {
                 connect(InetSocketAddress(node.server, node.port), TIMEOUT_MS)
                 soTimeout = TIMEOUT_MS
@@ -196,30 +204,58 @@ object ProxyTester {
             } else {
                 socks5Connect(out, inp, node, metadataHost, metadataPort)
             }
-            val path = "/json/$ip?fields=status,city,countryCode,mobile,proxy,hosting,isp"
-            out.write(
+            val ssl = (SSLSocketFactory.getDefault() as SSLSocketFactory)
+                .createSocket(socket, metadataHost, metadataPort, true) as SSLSocket
+            ssl.soTimeout = TIMEOUT_MS
+            ssl.startHandshake()
+            val path = "/$ip"
+            ssl.outputStream.write(
                 ("GET $path HTTP/1.1\r\nHost: $metadataHost\r\n" +
                     "User-Agent: ShieldProxy\r\nConnection: close\r\n\r\n").toByteArray()
             )
-            out.flush()
-            val o = org.json.JSONObject(readHttpBody(inp))
-            if (o.optString("status") != "success") return Metadata()
-            val city = o.optString("city", "")
-            val countryIso = o.optString("countryCode", "").lowercase()
-            val mobile = o.optBoolean("mobile", false)
-            val proxy = o.optBoolean("proxy", false)
-            val hosting = o.optBoolean("hosting", false)
-            val type = when {
-                hosting -> "⚠ Datacenter"
-                mobile -> "📶 Mobile"
-                proxy -> "⚠ Flagged"
-                else -> "🏠 Residential"
-            }
-            Metadata(city, type, countryIso)
+            ssl.outputStream.flush()
+            parseMetadata(readHttpBody(ssl.inputStream), ip)
         } catch (_: Exception) {
             Metadata()
         } finally {
             try { socket?.close() } catch (_: Exception) {}
+        }
+    }
+
+    internal fun parseMetadata(json: String, expectedIp: String): Metadata {
+        return try {
+            val o = org.json.JSONObject(json)
+            if (!o.optBoolean("success", false) || o.optString("ip") != expectedIp) return Metadata()
+            val city = o.optString("city", "").take(100)
+            val region = o.optString("region", "").take(100)
+            val countryIso = o.optString("country_code", "").lowercase()
+                .takeIf { it.matches(Regex("[a-z]{2}")) }.orEmpty()
+            val latitude = o.optDouble("latitude", Double.NaN).takeIf {
+                it.isFinite() && it in -90.0..90.0
+            }
+            val longitude = o.optDouble("longitude", Double.NaN).takeIf {
+                it.isFinite() && it in -180.0..180.0
+            }
+            val timezoneId = o.optJSONObject("timezone")?.optString("id").orEmpty()
+                .takeIf { it.length <= 80 && java.util.TimeZone.getAvailableIDs().contains(it) }
+                .orEmpty()
+            val security = o.optJSONObject("security")
+            val isp = o.optJSONObject("connection")?.optString("isp").orEmpty()
+            val mobile = security?.optBoolean("mobile", false) == true ||
+                isp.contains("mobile", ignoreCase = true) ||
+                isp.contains("wireless", ignoreCase = true)
+            val proxy = security?.optBoolean("proxy", false) == true ||
+                security?.optBoolean("vpn", false) == true
+            val hosting = security?.optBoolean("hosting", false) == true
+            val type = when {
+                hosting -> "⚠ Datacenter"
+                mobile -> "📶 Mobile"
+                proxy -> "⚠ Flagged"
+                else -> ""
+            }
+            Metadata(city, region, type, countryIso, latitude, longitude, timezoneId)
+        } catch (_: Exception) {
+            Metadata()
         }
     }
 }

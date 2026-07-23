@@ -42,13 +42,26 @@ object Supabase {
     // Persistent session: signed in as long as tokens are stored on this device. No expiry, no
     // freshness window, no auto-logout — only an explicit signOut() clears it. The refresh token
     // silently keeps API calls alive in the background.
-    /** Unlock only after this process has verified the stored session with GoTrue recently. */
-    fun isSignedIn(ctx: Context): Boolean {
+    /**
+     * Local unlock is persistent. Access-token expiry and a temporary Supabase outage must never
+     * throw the user back to the OTP screen; authorized cloud calls refresh their token lazily.
+     * Only [signOut] clears the sealed local session.
+     */
+    fun isSignedIn(ctx: Context): Boolean = hasStoredSession(ctx)
+
+    private fun hasRecentlyValidatedSession(ctx: Context): Boolean {
         if (!hasStoredSession(ctx) || !validatedThisProcess.get() || !tokenIsFresh(accessToken(ctx))) {
             return false
         }
         val age = System.currentTimeMillis() - validatedAtMs.get()
         return age in 0..VALIDATION_MAX_AGE_MS
+    }
+
+    /** Best-effort server validation for cloud operations; local unlock remains available offline. */
+    fun ensureValidatedSession(ctx: Context): Boolean {
+        if (!hasStoredSession(ctx)) return false
+        if (hasRecentlyValidatedSession(ctx)) return true
+        return validateStoredSession(ctx) || hasStoredSession(ctx)
     }
     fun hasStoredSession(ctx: Context): Boolean =
         !accessToken(ctx).isNullOrBlank() && !refreshToken(ctx).isNullOrBlank()
@@ -127,7 +140,7 @@ object Supabase {
         saveSession(ctx, o)
     }
 
-    /** Cold-start gate: GoTrue must accept (or refresh) the stored session before unlock. */
+    /** Best-effort server check used to refresh cloud credentials without changing local unlock. */
     @Synchronized
     fun validateStoredSession(ctx: Context): Boolean {
         if (!hasStoredSession(ctx)) return false
@@ -139,12 +152,16 @@ object Supabase {
             if (valid) {
                 validatedThisProcess.set(true)
                 validatedAtMs.set(System.currentTimeMillis())
-            } else clearLocalSession(ctx)
+            } else {
+                validatedThisProcess.set(false)
+                validatedAtMs.set(0L)
+            }
             valid
-        } catch (e: HttpError) {
-            // Definitive auth rejection: discard unusable credentials. Server/network failures
-            // leave the sealed session in place so the gate can offer a safe retry.
-            if (e.code == 401 || e.code == 403) clearLocalSession(ctx)
+        } catch (_: HttpError) {
+            // A revoked/expired server token disables cloud work, but it does not erase the user's
+            // local workspace or force an OTP loop. Explicit Log out is the only destructive path.
+            validatedThisProcess.set(false)
+            validatedAtMs.set(0L)
             false
         } catch (_: Exception) {
             false
@@ -268,19 +285,6 @@ object Supabase {
         val arr = org.json.JSONArray(resp)
         if (arr.length() == 0) return null
         return arr.getJSONObject(0).optJSONObject("data")?.toString()
-    }
-
-    // ---- Remote control (emergency kill switch) ------------------------------
-    private const val CONTROL_FIELD = "shieldproxy_control"
-
-    /** Read the remote-control object from user_metadata, or null if none set. */
-    fun readControl(ctx: Context): JSONObject? =
-        getCurrentUser(ctx).optJSONObject("user_metadata")?.optJSONObject(CONTROL_FIELD)
-
-    /** Write the remote-control object into user_metadata (visible to all this user's devices). */
-    fun writeControl(ctx: Context, control: JSONObject) {
-        val data = JSONObject().put(CONTROL_FIELD, control)
-        authorizedPut(ctx, "$URL/auth/v1/user", JSONObject().put("data", data).toString())
     }
 
     /**
