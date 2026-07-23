@@ -25,20 +25,19 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 
 /**
- * Proxy kill-switch + connection guard.
+ * Proxy route monitor.
  *
  * The user's rule: a clone must NEVER run without a live proxy. Once they open an app we
  *   1. verify the proxy is connected BEFORE the app is entered (done in MainActivity pre-flight),
  *   2. keep testing it every POLL_SECS while the app is open,
  *      with native fail-closed routing covering the interval until the next scheduled check,
- *   3. when the first scheduled health check confirms the proxy or phone network is down,
- *      FORCE-CLOSE the clone (not minimize), and
- *   4. keep the same sticky session on failure and tell the user when it is safe to re-open.
+ *   3. if scheduled health checks fail, keep the clone open with its network fail-closed, and
+ *   4. keep the same sticky session and resume traffic automatically when it recovers.
  *
  * The guard keeps running (foreground service) until the user turns it off. The native connect()
  * hook inside the container is already fail-closed (dead proxy -> ECONNREFUSED, no direct fallback),
- * so even in the seconds before we kill the clone there is no leak between clones; this service is
- * the visible, user-facing enforcement on top of that.
+ * so a proxy outage pauses traffic instead of exposing the phone IP. This service provides visible
+ * health reporting and detects true route-identity mismatches.
  */
 class ProxyGuardService : Service() {
 
@@ -109,7 +108,7 @@ class ProxyGuardService : Service() {
                             if (!persistArmedState()) {
                                 ARMED.remove(tag)
                                 ARMED_LAST.remove(tag)
-                                bg.post { BlackBoxBridge.stopClone(this, auth, uid, pkg) }
+                                android.util.Log.e("ProxyGuardService", "Could not persist route-monitor state")
                             }
                             updateNotif()
                         }
@@ -120,21 +119,16 @@ class ProxyGuardService : Service() {
                 val tag = intent.getStringExtra("tag")
                 if (tag != null) {
                     ARMED.remove(tag)
-                    // Turning the guard OFF for a clone also closes it — the user said "it should not
-                    // off until I off it", so an explicit off means stop using that proxy = stop app.
-                    val a = ARMED_LAST.remove(tag)
-                    if (a != null) bg.post { BlackBoxBridge.stopClone(this, a.auth, a.userId, a.pkg) }
+                    ARMED_LAST.remove(tag)
                     persistArmedState()
                 }
                 if (ARMED.isEmpty()) { stopSelf(); return START_NOT_STICKY }
                 updateNotif()
             }
             ACTION_STOP_ALL -> {
-                val snapshot = ARMED.values.toList()
                 ARMED.clear()
                 ARMED_LAST.clear()
                 persistArmedState()
-                bg.post { snapshot.forEach { BlackBoxBridge.stopClone(this, it.auth, it.userId, it.pkg) } }
                 stopSelf(); return START_NOT_STICKY
             }
         }
@@ -189,14 +183,9 @@ class ProxyGuardService : Service() {
         }
     }
 
-    /** If protected guard state exists but cannot authenticate, stop every configured clone. */
+    /** A corrupt monitor file must not change or rotate any configured clone route. */
     private fun failClosedGuardRestore(error: Throwable) {
         android.util.Log.e("ProxyGuardService", "Encrypted guard state could not be restored", error)
-        bg.post {
-            BlackBoxBridge.configuredRoutes(this).forEach { route ->
-                BlackBoxBridge.stopClone(this, route.authority, route.userId, route.pkg)
-            }
-        }
     }
 
     /** Credentials are written only through SecureFileStore (AES-GCM + account key). */
@@ -228,20 +217,9 @@ class ProxyGuardService : Service() {
         override fun run() {
             if (destroyed) return
             if (ARMED.isNotEmpty()) runTests()
-            maybeCheckRemote()
             updateNotif()
             if (!ARMED.isEmpty()) ui.postDelayed(this, 1000L)
         }
-    }
-
-    @Volatile private var lastRemoteCheck = 0L
-
-    /** Poll the remote emergency kill switch ~every 60s while guarding; check() force-stops all. */
-    private fun maybeCheckRemote() {
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastRemoteCheck < 60_000L) return
-        lastRemoteCheck = now
-        com.privacyshield.proxy.core.RemoteControl.checkAsync(this)
     }
 
     private fun runTests() {
@@ -311,7 +289,7 @@ class ProxyGuardService : Service() {
                     a.ip = r.ip
                     a.state = "connected"
                     if (a.aliveSince == 0L) a.aliveSince = SystemClock.elapsedRealtime()
-                    if (wasBad) alert(a, "✓ ${a.label} — proxy back online (${r.city.ifBlank { r.ip }}). Re-open the app.")
+                    if (wasBad) alert(a, "✓ ${a.label} — proxy back online (${r.city.ifBlank { r.ip }}). Traffic resumed automatically.")
                 } else if (r.reachableOnly) {
                     // Proxy socket answered but exit IP couldn't be confirmed — network wobble, don't
                     // kill yet, just don't reset the alive clock.
@@ -331,27 +309,23 @@ class ProxyGuardService : Service() {
         }
     }
 
-    /** Proxy confirmed unreachable: CLOSE the clone (fail-closed, no leak) but KEEP THE SAME sticky
-     *  session. We do NOT auto-rotate anymore — minting a fresh session changes the exit IP, which
-     *  logs logged-in accounts (IG etc.) straight OUT. Instead we keep re-testing the SAME session and
-     *  recover when it comes back (24h sticky sessions rarely die; a blip is usually transient). */
+    /**
+     * A proxy outage never force-stops or rotates the clone. The native route remains fail-closed,
+     * so requests pause instead of falling back to the phone IP. The same app session resumes when
+     * the same sticky proxy returns.
+     */
     private fun onProxyDead(a: Armed) {
-        val wasRunning = BlackBoxBridge.isCloneRunning(this, a.auth, a.userId, a.pkg)
-        BlackBoxBridge.stopClone(this, a.auth, a.userId, a.pkg)   // <-- CLOSE app, not minimize
         a.state = "down"
         a.city = ""; a.type = ""; a.ip = ""
         a.nextTestAt = SystemClock.elapsedRealtime() + POLL_SECS * 1000L
-        alert(a, if (wasRunning)
-            "⚠ ${a.label} — proxy unreachable. App CLOSED to stop any leak. Route reserved; re-open only after the proxy is back."
-        else
-            "⚠ ${a.label} — proxy unreachable. App remains closed. Route reserved until the proxy is back.")
+        alert(a, "${a.label} — proxy temporarily unreachable. App remains open; network is paused with no direct fallback.")
     }
 
     private fun onRouteViolation(a: Armed, reason: String) {
         BlackBoxBridge.stopClone(this, a.auth, a.userId, a.pkg)
-        a.state = "down"
-        a.city = ""; a.type = ""; a.ip = ""
-        a.nextTestAt = SystemClock.elapsedRealtime() + POLL_SECS * 1000L
+        ARMED.remove(a.tag)
+        ARMED_LAST.remove(a.tag)
+        persistArmedState()
         alert(a, "${a.label} - route identity changed ($reason). App CLOSED to prevent a cross-clone or direct-IP leak.")
     }
 
@@ -376,9 +350,9 @@ class ProxyGuardService : Service() {
                 }
                 "recovering" -> {
                     val secs = ((a.nextTestAt - now) / 1000).coerceAtLeast(0)
-                    "🟡 ${a.label} — proxy recovering; app remains closed · rechecking in ${secs}s"
+                    "🟡 ${a.label} — proxy recovering; network paused · rechecking in ${secs}s"
                 }
-                "down" -> "🔴 ${a.label} — proxy DOWN (no session to rotate). App closed."
+                "down" -> "🔴 ${a.label} — proxy unavailable; app network paused, route retained."
                 else -> "⏳ ${a.label} — checking…"
             }
         }
@@ -401,7 +375,7 @@ class ProxyGuardService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(open)
-            .addAction(0, "Turn guard off (close apps)", stopAll)
+            .addAction(0, "Stop monitoring", stopAll)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
@@ -411,7 +385,7 @@ class ProxyGuardService : Service() {
         try {
             val n = NotificationCompat.Builder(this, CHANNEL_ALERT)
                 .setSmallIcon(R.drawable.ic_shield)
-                .setContentTitle("ShieldProxy — kill-switch")
+                .setContentTitle("ShieldProxy — route monitor")
                 .setContentText(msg)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(msg))
                 .setAutoCancel(true)
@@ -430,8 +404,8 @@ class ProxyGuardService : Service() {
             val nm = getSystemService(NotificationManager::class.java)
             nm.createNotificationChannel(NotificationChannel(CHANNEL, "Proxy guard",
                 NotificationManager.IMPORTANCE_LOW).apply { description = "Live proxy connection status" })
-            nm.createNotificationChannel(NotificationChannel(CHANNEL_ALERT, "Proxy kill-switch alerts",
-                NotificationManager.IMPORTANCE_HIGH).apply { description = "App closed / proxy back online" })
+            nm.createNotificationChannel(NotificationChannel(CHANNEL_ALERT, "Proxy route alerts",
+                NotificationManager.IMPORTANCE_HIGH).apply { description = "Proxy paused / recovered / unsafe route" })
         }
     }
 
@@ -449,8 +423,8 @@ class ProxyGuardService : Service() {
         // fall back to the phone IP; it only delays the user-facing "proxy down" decision.
         private const val POLL_SECS = 60          // proxy re-test cadence while an app is open
         private const val ROUTE_VERIFY_SECS = 60  // heavier in-guest exit/guard proof
-        private const val FAIL_STRIKES = 1        // first confirmed failure closes the clone
-        private const val ROUTE_PROBE_STRIKES = 2 // one IP-check vendor timeout is not confirmation
+        private const val FAIL_STRIKES = 3        // tolerate two transient failures; route stays fail-closed
+        private const val ROUTE_PROBE_STRIKES = 4 // tolerate independent IP-check endpoint instability
         private const val STATE_FILE = "proxy_guard_state.sec"
         private const val FG_ID = 4801
         private const val CHANNEL = "proxy_guard"
@@ -507,8 +481,8 @@ class ProxyGuardService : Service() {
             val a = ARMED[tag] ?: return null
             return when (a.state) {
                 "connected" -> "🟢 Connected${if (a.city.isNotBlank()) " · ${a.city}" else ""}${if (a.type.isNotBlank()) " · ${a.type}" else ""}"
-                "recovering" -> "🟡 Down — rotating proxy…"
-                "down" -> "🔴 Down — app closed"
+                "recovering" -> "🟡 Proxy recovering — network paused"
+                "down" -> "🔴 Proxy unavailable — network paused"
                 else -> "⏳ Checking…"
             }
         }

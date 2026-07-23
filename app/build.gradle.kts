@@ -23,8 +23,8 @@ android {
         applicationId = "com.privacyshield.proxy"
         minSdk = 24
         targetSdk = 36
-        versionCode = 16
-        versionName = "8.8"
+        versionCode = 17
+        versionName = "8.9"
 
         ndk {
             // Match the ABIs the Mihomo .aar was built for (arm64/arm/x86_64).
@@ -92,4 +92,7 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.documentfile:documentfile:1.0.1")
     testImplementation("junit:junit:4.13.2")
+    // Android's local-test JSONObject is a stub; use the matching standalone implementation so
+    // verified exit metadata acceptance/rejection tests execute the real parser.
+    testImplementation("org.json:json:20240303")
 }

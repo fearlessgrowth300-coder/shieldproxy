@@ -185,8 +185,6 @@ class MainActivity : AppCompatActivity() {
             return
         }
         refresh()
-        // Poll the remote emergency kill switch each time the app comes forward.
-        com.privacyshield.proxy.core.RemoteControl.checkAsync(this)
     }
 
     private fun refresh() {
@@ -684,12 +682,6 @@ class MainActivity : AppCompatActivity() {
      * so the clone would silently start behind ShieldProxy and "never open".
      */
     private fun launchClone(tag: String, node: com.privacyshield.proxy.core.ProxyNode?, listName: String): Boolean {
-        // Emergency kill switch: never open a clone while it's armed (locally cached, so it holds
-        // even offline). Disarmed from Settings or any of the user's other devices.
-        if (com.privacyshield.proxy.core.RemoteControl.isKilled(this)) {
-            toast("Emergency kill switch is ON — disarm it in Settings to open clones.")
-            return false
-        }
         val parts = tag.split(":", limit = 4)
         val auth = parts.getOrNull(1) ?: return false
         val uid = parts.getOrNull(2)?.toIntOrNull() ?: return false
@@ -711,9 +703,22 @@ class MainActivity : AppCompatActivity() {
                 }
                 return@Thread
             }
+            if (!tested.geoVerified) {
+                runOnUiThread {
+                    showCloneFailure(
+                        label,
+                        "The proxy exit country, timezone, and coordinates could not all be verified."
+                    )
+                }
+                return@Thread
+            }
 
             val verified = com.privacyshield.proxy.core.BlackBoxBridge
-                .assignAndVerifyRoute(this, auth, uid, pkg, node, tested.ip, tested.countryIso)
+                .assignAndVerifyRoute(
+                    this, auth, uid, pkg, node, tested.ip, tested.countryIso,
+                    tested.city, tested.region, tested.latitude, tested.longitude,
+                    tested.timezoneId
+                )
             if (!verified.ok || verified.routeId.isBlank()
                 || verified.exitIp.isBlank()) {
                 com.privacyshield.proxy.core.BlackBoxBridge.stopClone(this, auth, uid, pkg)

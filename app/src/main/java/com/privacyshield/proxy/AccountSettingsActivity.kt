@@ -15,7 +15,6 @@ import androidx.appcompat.app.AppCompatActivity
 import com.privacyshield.proxy.core.BlackBoxBridge
 import com.privacyshield.proxy.core.CloudSync
 import com.privacyshield.proxy.core.DriveFolderStore
-import com.privacyshield.proxy.core.RemoteControl
 import com.privacyshield.proxy.core.Supabase
 import com.privacyshield.proxy.core.VaultKeyStore
 
@@ -23,8 +22,6 @@ import com.privacyshield.proxy.core.VaultKeyStore
 class AccountSettingsActivity : AppCompatActivity() {
     private lateinit var connectionStatus: TextView
     private lateinit var connectionButton: Button
-    private lateinit var killStatus: TextView
-    private lateinit var killButton: Button
 
     companion object {
         const val EXTRA_ACTION = "account_action"
@@ -79,13 +76,6 @@ class AccountSettingsActivity : AppCompatActivity() {
             startActivity(Intent(this, LeakTestActivity::class.java))
         })
 
-        root.addView(sectionLabel("Emergency kill switch"))
-        killStatus = TextView(this).apply { textSize = 14f; setPadding(0, gap, 0, 0) }
-        root.addView(killStatus)
-        killButton = actionButton("…") { toggleKill() }
-        root.addView(killButton)
-        renderKill()
-
         root.addView(TextView(this).apply {
             text = "Sign-in\nPasswordless — a 6-digit code is emailed to you each time you log in. " +
                 "Nothing to remember or reset."
@@ -122,31 +112,6 @@ class AccountSettingsActivity : AppCompatActivity() {
     private fun sectionLabel(text: String) = TextView(this).apply {
         this.text = text; textSize = 19f; setTextColor(Color.WHITE)
         setPadding(0, (16 * resources.displayMetrics.density).toInt(), 0, 0)
-    }
-
-    // ---- Emergency kill switch ----
-    private fun renderKill() {
-        val on = RemoteControl.isKilled(this)
-        killStatus.setTextColor(if (on) Color.parseColor("#FF8A80") else Color.parseColor("#69F0AE"))
-        killStatus.text = if (on)
-            "ARMED — all clones force-closed and launches blocked.\n${RemoteControl.killedReason(this)}".trim()
-        else "Off — clones can open normally."
-        killButton.text = if (on) "Disarm kill switch" else "ARM kill switch (close all clones now)"
-    }
-
-    private fun toggleKill() {
-        val turnOn = !RemoteControl.isKilled(this)
-        killButton.isEnabled = false
-        Thread {
-            val ok = runCatching {
-                RemoteControl.setKill(this, turnOn, if (turnOn) "Armed from settings" else "")
-            }.isSuccess
-            runOnUiThread {
-                killButton.isEnabled = true
-                if (!ok) toast("Couldn't reach the server — try again when online.")
-                renderKill()
-            }
-        }.start()
     }
 
     private fun testRecoveryKey() {

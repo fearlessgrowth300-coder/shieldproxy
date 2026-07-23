@@ -155,13 +155,19 @@ object BlackBoxBridge {
      * binds the later guest-process verification to this assignment. */
     fun setCloneProxy(
         ctx: Context, authority: String, userId: Int, pkg: String, node: ProxyNode,
-        verifiedCountryIso: String = ""
+        verifiedCountryIso: String = "", verifiedCity: String = "",
+        verifiedRegion: String = "", verifiedLatitude: Double? = null,
+        verifiedLongitude: Double? = null, verifiedTimezoneId: String = ""
     ): BbProxyAssignment = try {
         val extras = android.os.Bundle().apply {
             putInt("userId", userId); putString("pkg", pkg)
             putString("type", node.type); putString("server", node.server); putInt("port", node.port)
             putString("username", node.username); putString("password", node.password)
             putString("countryIso", verifiedCountryIso.ifBlank { node.countryIsoHint() })
+            putString("city", verifiedCity); putString("region", verifiedRegion)
+            if (verifiedLatitude != null) putDouble("latitude", verifiedLatitude)
+            if (verifiedLongitude != null) putDouble("longitude", verifiedLongitude)
+            putString("timezoneId", verifiedTimezoneId)
         }
         val r = ctx.contentResolver.call(baseFor(authority), "setProxy", null, extras)
         BbProxyAssignment(
@@ -286,7 +292,10 @@ object BlackBoxBridge {
      * route, and compare its observed exit IP before returning success. */
     fun assignAndVerifyRoute(
         ctx: Context, authority: String, userId: Int, pkg: String,
-        node: ProxyNode, expectedExitIp: String, verifiedCountryIso: String = ""
+        node: ProxyNode, expectedExitIp: String, verifiedCountryIso: String = "",
+        verifiedCity: String = "", verifiedRegion: String = "",
+        verifiedLatitude: Double? = null, verifiedLongitude: Double? = null,
+        verifiedTimezoneId: String = ""
     ): BbRouteVerification = try {
         val extras = android.os.Bundle().apply {
             putInt("userId", userId); putString("pkg", pkg)
@@ -294,6 +303,10 @@ object BlackBoxBridge {
             putString("username", node.username); putString("password", node.password)
             putString("expectedExitIp", expectedExitIp)
             putString("countryIso", verifiedCountryIso.ifBlank { node.countryIsoHint() })
+            putString("city", verifiedCity); putString("region", verifiedRegion)
+            if (verifiedLatitude != null) putDouble("latitude", verifiedLatitude)
+            if (verifiedLongitude != null) putDouble("longitude", verifiedLongitude)
+            putString("timezoneId", verifiedTimezoneId)
         }
         val r = ctx.contentResolver.call(baseFor(authority), "assignAndVerifyRoute", null, extras)
         BbRouteVerification(
@@ -308,7 +321,7 @@ object BlackBoxBridge {
         BbRouteVerification(false, error = e.message ?: e.javaClass.simpleName)
     }
 
-    /** Kill-switch: force-close a running clone (used when its proxy/session dies). */
+    /** Force-close only when a verified route identity becomes unsafe. */
     fun stopClone(ctx: Context, authority: String, userId: Int, pkg: String): Boolean = try {
         val extras = android.os.Bundle().apply { putInt("userId", userId); putString("pkg", pkg) }
         val r = ctx.contentResolver.call(baseFor(authority), "stopApp", null, extras)
