@@ -18,7 +18,7 @@ import java.util.UUID
 /** Downloads only a newer APK that is the expected package and is signed by this installed app. */
 object Updater {
     private const val METADATA_URL =
-        "https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/public/app-releases/shieldproxy/latest.json"
+        "https://github.com/fearlessgrowth300-coder/shieldproxy/releases/download/latest/version.json"
     private const val MAX_APK_BYTES = 350L * 1024L * 1024L
     private const val MAX_METADATA_CHARS = 128 * 1024
     private val SHA256 = Regex("^[0-9a-fA-F]{64}$")
@@ -40,7 +40,7 @@ object Updater {
             o.optInt("versionCode"),
             o.optString("versionName").take(40),
             o.optString("packageName"),
-            o.optString("apkUrl"),
+            o.optString("apk").ifBlank { o.optString("apkUrl") },
             o.optString("sha256"),
             o.optString("notes").take(4000),
             if (o.has("rolloutPercent")) o.optInt("rolloutPercent").coerceIn(0, 100) else 100

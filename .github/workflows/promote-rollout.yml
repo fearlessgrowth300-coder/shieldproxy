@@ -13,7 +13,7 @@ on:
         type: number
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: promote-shieldproxy-rollout
@@ -27,10 +27,11 @@ jobs:
       - name: Fetch, verify and promote existing metadata
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           EXPECTED_VERSION_CODE: ${{ inputs.expected_version_code }}
           ROLLOUT_PERCENT: ${{ inputs.rollout_percent }}
-          PUBLIC_URL: https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/public/app-releases/shieldproxy/latest.json
+          PUBLIC_URL: https://github.com/fearlessgrowth300-coder/shieldproxy/releases/download/latest/version.json
           WRITE_URL: https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/app-releases/shieldproxy/latest.json
         run: |
           test -n "$SUPABASE_SECRET_KEY"
@@ -61,5 +62,8 @@ jobs:
             -H "x-upsert: true" \
             --data-binary @promoted.json \
             "$WRITE_URL"
-          curl --fail-with-body --silent --show-error --retry 3 "$PUBLIC_URL" -o verified.json
+          gh release upload latest "promoted.json#version.json" --clobber
+          curl --fail-with-body --silent --show-error --retry 3 \
+            "https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/public/app-releases/shieldproxy/latest.json" \
+            -o verified.json
           cmp promoted.json verified.json

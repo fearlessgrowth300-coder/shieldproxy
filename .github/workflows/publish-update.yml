@@ -15,7 +15,7 @@ on:
       channel:
         description: Beta publishes a signed prerelease without notifying existing installations
         required: true
-        default: beta
+        default: stable
         type: choice
         options:
           - beta
@@ -63,6 +63,14 @@ jobs:
           chmod 600 "$RUNNER_TEMP/suite-release.jks"
           echo "SHIELD_SUITE_KEYSTORE=$RUNNER_TEMP/suite-release.jks" >> "$GITHUB_ENV"
 
+      - name: Assign a monotonic build version
+        shell: bash
+        run: |
+          VERSION_CODE=$(( $(date -u +%s) - 1577836800 ))
+          test "$VERSION_CODE" -gt 20
+          test "$VERSION_CODE" -le 2100000000
+          echo "BUILD_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+
       - name: Test and build the signed release
         shell: bash
         run: |
@@ -79,10 +87,12 @@ jobs:
           "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
           unzip -Z1 "$APK" | grep -q '^lib/arm64-v8a/'
           unzip -Z1 "$APK" | grep -q '^lib/armeabi-v7a/'
-          VERSION_CODE="$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' app/build.gradle.kts | head -1)"
-          VERSION_NAME="$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle.kts | head -1)"
+          BADGING="$("$BUILD_TOOLS/aapt" dump badging "$APK" | head -1)"
+          VERSION_CODE="$(printf '%s' "$BADGING" | sed -nE "s/.*versionCode='([0-9]+)'.*/\\1/p")"
+          VERSION_NAME="$(printf '%s' "$BADGING" | sed -nE "s/.*versionName='([^']+)'.*/\\1/p")"
           test -n "$VERSION_CODE"
           test -n "$VERSION_NAME"
+          test "$VERSION_CODE" = "$BUILD_VERSION_CODE"
           SHA256="$(sha256sum "$APK" | cut -d' ' -f1)"
           ASSET_NAME="ShieldProxy-${VERSION_NAME}.apk"
           TAG="shieldproxy-${VERSION_CODE}"
@@ -123,22 +133,29 @@ jobs:
           ASSET_NAME: ${{ steps.release.outputs.asset_name }}
           SHA256: ${{ steps.release.outputs.sha256 }}
           ROLLOUT_PERCENT: ${{ inputs.rollout_percent }}
+          CHANNEL: ${{ inputs.channel }}
         run: |
           python3 - <<'PY'
           import json, os
-          rollout = int(os.environ["ROLLOUT_PERCENT"])
+          rollout = 0 if os.environ["CHANNEL"] == "beta" else int(os.environ["ROLLOUT_PERCENT"])
           if not 0 <= rollout <= 100:
               raise SystemExit("rollout_percent must be between 0 and 100")
+          apk = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/latest/ShieldProxy.apk"
+          immutable_apk = (
+              f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/"
+              f"{os.environ['TAG']}/{os.environ['ASSET_NAME']}"
+          )
           metadata = {
               "versionCode": int(os.environ["VERSION_CODE"]),
               "versionName": os.environ["VERSION_NAME"],
+              "apk": apk,
               "packageName": "com.privacyshield.proxy",
-              "apkUrl": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{os.environ['TAG']}/{os.environ['ASSET_NAME']}",
+              "apkUrl": immutable_apk,
               "sha256": os.environ["SHA256"],
               "notes": os.environ["NOTES"],
               "rolloutPercent": rollout,
           }
-          with open("latest.json", "w", encoding="utf-8") as output:
+          with open("version.json", "w", encoding="utf-8") as output:
               json.dump(metadata, output, ensure_ascii=False, separators=(",", ":"))
           PY
 
@@ -148,7 +165,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
         run: |
-          gh release upload "$TAG" "latest.json#ShieldProxy-update.json" --clobber
+          gh release upload "$TAG" "version.json" --clobber
+
+      - name: Publish the stable latest-tag URLs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APK: ${{ steps.release.outputs.apk }}
+          VERSION_NAME: ${{ steps.release.outputs.version_name }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/latest-notes.txt"
+          if ! gh release view latest >/dev/null 2>&1; then
+            gh release create latest --target "$GITHUB_SHA" \
+              --title "ShieldProxy latest ($VERSION_NAME)" \
+              --notes-file "$RUNNER_TEMP/latest-notes.txt"
+          else
+            gh release edit latest \
+              --title "ShieldProxy latest ($VERSION_NAME)" \
+              --notes-file "$RUNNER_TEMP/latest-notes.txt"
+          fi
+          gh release upload latest "$APK#ShieldProxy.apk" --clobber
+          gh release upload latest version.json --clobber
 
       - name: Publish metadata only after the APK passed every check
         if: inputs.channel == 'stable'
@@ -162,5 +200,5 @@ jobs:
             -H "apikey: $SUPABASE_SECRET_KEY" \
             -H "Content-Type: application/json" \
             -H "x-upsert: true" \
-            --data-binary @latest.json \
+            --data-binary @version.json \
             "https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/app-releases/shieldproxy/latest.json"

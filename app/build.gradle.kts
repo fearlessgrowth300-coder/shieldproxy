@@ -14,6 +14,15 @@ val suiteKeyPassword = providers.environmentVariable("SHIELD_SUITE_KEY_PASSWORD"
 val suiteSigningReady = listOf(
     suiteKeystorePath, suiteStorePassword, suiteKeyAlias, suiteKeyPassword
 ).all { !it.isNullOrBlank() }
+val buildVersionCode = providers.gradleProperty("buildVersionCode")
+    .orElse(providers.environmentVariable("BUILD_VERSION_CODE"))
+    .orNull
+    ?.toIntOrNull()
+    ?: ((System.currentTimeMillis() / 1000L) - 1_577_836_800L).toInt()
+
+check(buildVersionCode in 1..2_100_000_000) {
+    "buildVersionCode must be between 1 and 2100000000"
+}
 
 android {
     namespace = "com.privacyshield.proxy"
@@ -23,8 +32,10 @@ android {
         applicationId = "com.privacyshield.proxy"
         minSdk = 24
         targetSdk = 36
-        versionCode = 20
-        versionName = "9.2"
+        // Seconds since 2020-01-01. Every independently started build receives a
+        // greater installable version unless CI supplies an explicit override.
+        versionCode = buildVersionCode
+        versionName = "9.3"
 
         ndk {
             // Match the ABIs the Mihomo .aar was built for (arm64/arm/x86_64).
@@ -44,6 +55,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Never let Gradle create/use its machine-specific debug keystore.
+            signingConfig = signingConfigs.getByName("suiteRelease")
+        }
         release {
             signingConfig = signingConfigs.getByName("suiteRelease")
             isMinifyEnabled = false
@@ -64,14 +79,20 @@ android {
 }
 
 gradle.taskGraph.whenReady {
-    val packagesRelease = allTasks.any {
-        it.project == project && it.name.matches(
-            Regex("(?i).*(assemble|bundle|package|install|publish).*release.*")
-        )
+    val packagesApplication = gradle.startParameter.taskNames.any { requested ->
+        val task = requested.substringAfterLast(':').lowercase()
+        task.startsWith("assemble") ||
+            task.startsWith("bundle") ||
+            task.startsWith("package") ||
+            task.startsWith("install") ||
+            task.startsWith("publish") ||
+            task == "build" ||
+            task.startsWith("buildneeded") ||
+            task.startsWith("builddependents")
     }
-    if (packagesRelease) {
+    if (packagesApplication) {
         check(suiteSigningReady) {
-            "Release signing is locked. Set SHIELD_SUITE_KEYSTORE, " +
+            "Debug and release signing are locked to the permanent suite key. Set SHIELD_SUITE_KEYSTORE, " +
                 "SHIELD_SUITE_STORE_PASSWORD, SHIELD_SUITE_KEY_ALIAS, and " +
                 "SHIELD_SUITE_KEY_PASSWORD (or the matching shieldSuite* Gradle properties)."
         }
