@@ -185,7 +185,8 @@ jobs:
               --title "ShieldProxy latest ($VERSION_NAME)" \
               --notes-file "$RUNNER_TEMP/latest-notes.txt"
           fi
-          gh release upload latest "$APK#ShieldProxy.apk" --clobber
+          cp "$APK" "$RUNNER_TEMP/ShieldProxy.apk"
+          gh release upload latest "$RUNNER_TEMP/ShieldProxy.apk" --clobber
           gh release upload latest version.json --clobber
 
       - name: Publish metadata only after the APK passed every check
