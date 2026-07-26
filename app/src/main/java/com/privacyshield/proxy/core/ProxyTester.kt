@@ -7,6 +7,8 @@ import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
@@ -34,6 +36,11 @@ object ProxyTester {
     private const val HOST = "api.ipify.org"
     private const val PORT = 443
     private const val TIMEOUT_MS = 8_000
+    private const val GEO_CACHE_MS = 30L * 60L * 1000L
+    private const val MAX_GEO_CACHE_ENTRIES = 64
+
+    private data class CachedMetadata(val metadata: Metadata, val storedAtMs: Long)
+    private val geoCache = ConcurrentHashMap<String, CachedMetadata>()
 
     fun test(node: ProxyNode, lookupMetadata: Boolean = true): Result {
         if (!node.isValid()) return Result(false, error = "invalid proxy")
@@ -79,7 +86,7 @@ object ProxyTester {
             if (ip.isEmpty() || !ip.matches(Regex("^[0-9a-fA-F:.]+$"))) {
                 return Result(false, error = "no IP returned")
             }
-            val info = if (lookupMetadata) lookupInfo(node, ip) else Metadata()
+            val info = if (lookupMetadata) cachedOrLookupInfo(node, ip) else Metadata()
             return Result(
                 true, ip = ip, city = info.city, type = info.type,
                 region = info.region,
@@ -94,6 +101,37 @@ object ProxyTester {
         } finally {
             try { socket?.close() } catch (_: Exception) {}
         }
+    }
+
+    /**
+     * Geo lookup is the second authenticated TLS tunnel in every launch preflight. Reuse it only
+     * for the exact proxy identity and exact observed exit IP, and only briefly. The exit-IP test
+     * still runs on every launch, so a rotating node cannot inherit stale country/location data.
+     */
+    private fun cachedOrLookupInfo(node: ProxyNode, ip: String): Metadata {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val key = geoCacheKey(node, ip)
+        geoCache[key]?.takeIf { now - it.storedAtMs in 0..GEO_CACHE_MS }?.let {
+            return it.metadata
+        }
+        val metadata = lookupInfo(node, ip)
+        if (metadata.countryIso.isNotBlank() && metadata.latitude != null &&
+            metadata.longitude != null && metadata.timezoneId.isNotBlank()) {
+            if (geoCache.size >= MAX_GEO_CACHE_ENTRIES) {
+                geoCache.entries.removeIf { now - it.value.storedAtMs > GEO_CACHE_MS }
+                if (geoCache.size >= MAX_GEO_CACHE_ENTRIES) geoCache.clear()
+            }
+            geoCache[key] = CachedMetadata(metadata, now)
+        }
+        return metadata
+    }
+
+    private fun geoCacheKey(node: ProxyNode, ip: String): String {
+        val canonical = "${node.type.lowercase()}\n${node.server.lowercase()}\n" +
+            "${node.port}\n${node.username}\n$ip"
+        return MessageDigest.getInstance("SHA-256")
+            .digest(canonical.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
     // ---- SOCKS5 ------------------------------------------------------------
