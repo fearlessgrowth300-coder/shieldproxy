@@ -34,7 +34,11 @@ object Updater {
     )
 
     fun check(ctx: Context): Release? {
-        val json = runCatching { fetch(METADATA_URL) }.getOrNull() ?: return null
+        // GitHub's fixed latest-tag asset can otherwise remain cached after a staged rollout is
+        // promoted. A five-minute cohort URL plus no-cache headers makes rollout changes visible
+        // promptly without generating a unique CDN object for every app launch.
+        val metadataUrl = "$METADATA_URL?check=${System.currentTimeMillis() / 300_000L}"
+        val json = runCatching { fetch(metadataUrl) }.getOrNull() ?: return null
         val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
         val release = Release(
             o.optInt("versionCode"),
@@ -207,6 +211,9 @@ object Updater {
             connectTimeout = 15_000
             readTimeout = 15_000
             instanceFollowRedirects = true
+            useCaches = false
+            setRequestProperty("Cache-Control", "no-cache")
+            setRequestProperty("Pragma", "no-cache")
         }
         return try {
             check(connection.responseCode in 200..299) {
