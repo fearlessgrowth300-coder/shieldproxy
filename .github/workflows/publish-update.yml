@@ -168,6 +168,7 @@ jobs:
           gh release upload "$TAG" "version.json" --clobber
 
       - name: Publish the stable latest-tag URLs
+        if: inputs.channel == 'stable'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
