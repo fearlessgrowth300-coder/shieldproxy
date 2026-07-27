@@ -80,6 +80,6 @@ jobs:
             --data-binary @stable.json \
             "https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/app-releases/shieldproxy/latest.json"
           cp candidate.apk ShieldProxy.apk
-          gh release upload latest ShieldProxy.apk --clobber
-          gh release upload latest "stable.json#version.json" --clobber
+          gh release upload latest ShieldProxy.apk --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload latest "stable.json#version.json" --clobber --repo "$GITHUB_REPOSITORY"
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest

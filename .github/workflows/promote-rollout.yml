@@ -62,7 +62,7 @@ jobs:
             -H "x-upsert: true" \
             --data-binary @promoted.json \
             "$WRITE_URL"
-          gh release upload latest "promoted.json#version.json" --clobber
+          gh release upload latest "promoted.json#version.json" --clobber --repo "$GITHUB_REPOSITORY"
           curl --fail-with-body --silent --show-error --retry 3 \
             "https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/public/app-releases/shieldproxy/latest.json" \
             -o verified.json
