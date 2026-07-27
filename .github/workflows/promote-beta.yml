@@ -88,3 +88,46 @@ jobs:
           cp stable.json version.json
           gh release upload latest version.json --clobber --repo "$GITHUB_REPOSITORY"
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
+
+      - name: Verify the published update chain end to end
+        shell: bash
+        env:
+          EXPECTED_VERSION_CODE: ${{ inputs.expected_version_code }}
+          SUPABASE_METADATA: https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/public/app-releases/shieldproxy/latest.json
+        run: |
+          # A promotion is only real when what clients READ matches what they DOWNLOAD. Those two
+          # halves have drifted apart twice in the sibling repository: once when an asset upload
+          # failed after the Supabase POST had already succeeded, and once when "file#name" uploaded
+          # metadata under the wrong asset name. Both left every install offered an update whose
+          # checksum could never match, and both looked like a green run. Re-read the published
+          # files exactly as a client does and fail loudly rather than ship a dead update.
+          curl --fail-with-body --silent --show-error --location --retry 5 --retry-all-errors \
+            -H 'Cache-Control: no-cache' \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/latest/version.json?check=$GITHUB_RUN_ID" \
+            -o published.json
+          curl --fail-with-body --silent --show-error --location --retry 5 --retry-all-errors \
+            "$SUPABASE_METADATA" -o supabase.json
+          python3 - <<'PY'
+          import hashlib, json, os, urllib.request
+          expected = int(os.environ["EXPECTED_VERSION_CODE"])
+          published = json.load(open("published.json"))
+          supabase = json.load(open("supabase.json"))
+          failures = []
+          for source, meta in (("github", published), ("supabase", supabase)):
+              if meta.get("versionCode") != expected:
+                  failures.append(
+                      f"{source} metadata advertises versionCode {meta.get('versionCode')}, expected {expected}")
+          apk_url = published.get("apk", "")
+          digest = ""
+          if not apk_url.startswith("https://"):
+              failures.append(f"metadata apk url is not https: {apk_url!r}")
+          else:
+              with urllib.request.urlopen(apk_url) as response:
+                  digest = hashlib.sha256(response.read()).hexdigest()
+              if digest != published.get("sha256"):
+                  failures.append(
+                      f"{apk_url} hashes {digest} but metadata claims {published.get('sha256')}")
+          if failures:
+              raise SystemExit("published update chain is inconsistent:\n  " + "\n  ".join(failures))
+          print(f"update chain verified: versionCode {expected}, sha256 {digest}")
+          PY
