@@ -15,7 +15,8 @@ data class BbProxyAssignment(
 
 data class BbRouteVerification(
     val ok: Boolean, val routeId: String = "", val exitIp: String = "",
-    val state: String = "", val error: String = "", val latencyMs: Long = 0L
+    val state: String = "", val error: String = "", val latencyMs: Long = 0L,
+    val kernelGuard: Boolean = false, val sensorGuard: Boolean = false
 )
 
 data class BbIdentityStatus(
@@ -282,7 +283,9 @@ object BlackBoxBridge {
             exitIp = r?.getString("exitIp").orEmpty(),
             state = r?.getString("state").orEmpty(),
             error = r?.getString("err").orEmpty(),
-            latencyMs = r?.getLong("latencyMs") ?: 0L
+            latencyMs = r?.getLong("latencyMs") ?: 0L,
+            kernelGuard = r?.getBoolean("kernelGuard") == true,
+            sensorGuard = r?.getBoolean("sensorGuard") == true
         )
     } catch (e: Exception) {
         BbRouteVerification(false, error = e.message ?: e.javaClass.simpleName)
@@ -315,7 +318,9 @@ object BlackBoxBridge {
             exitIp = r?.getString("exitIp").orEmpty(),
             state = r?.getString("state").orEmpty(),
             error = r?.getString("err").orEmpty(),
-            latencyMs = r?.getLong("latencyMs") ?: 0L
+            latencyMs = r?.getLong("latencyMs") ?: 0L,
+            kernelGuard = r?.getBoolean("kernelGuard") == true,
+            sensorGuard = r?.getBoolean("sensorGuard") == true
         )
     } catch (e: Exception) {
         BbRouteVerification(false, error = e.message ?: e.javaClass.simpleName)

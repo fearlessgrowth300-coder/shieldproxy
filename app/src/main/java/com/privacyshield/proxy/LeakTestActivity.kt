@@ -208,7 +208,8 @@ class LeakTestActivity : AppCompatActivity() {
             t,
             if (warning) 1 else 0,
             if (warning) "Verified with IPv6/UDP guard" else "Identity and route verified",
-            "Exit ${route.exitIp.ifBlank { proxy.ip }}$location · Remote DNS · Direct fallback blocked",
+            "Exit ${route.exitIp.ifBlank { proxy.ip }}$location · Remote DNS · Direct fallback blocked" +
+                " · Kernel ID isolated · Sensor calibration isolated",
             identity.digest,
             route.routeId
         )

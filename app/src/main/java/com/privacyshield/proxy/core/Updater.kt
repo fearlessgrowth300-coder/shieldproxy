@@ -18,7 +18,7 @@ import java.util.UUID
 /** Downloads only a newer APK that is the expected package and is signed by this installed app. */
 object Updater {
     private const val METADATA_URL =
-        "https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/public/app-releases/shieldproxy/latest.json"
+        "https://github.com/fearlessgrowth300-coder/shieldproxy/releases/download/latest/version.json"
     private const val MAX_APK_BYTES = 350L * 1024L * 1024L
     private const val MAX_METADATA_CHARS = 128 * 1024
     private val SHA256 = Regex("^[0-9a-fA-F]{64}$")
@@ -34,13 +34,17 @@ object Updater {
     )
 
     fun check(ctx: Context): Release? {
-        val json = runCatching { fetch(METADATA_URL) }.getOrNull() ?: return null
+        // GitHub's fixed latest-tag asset can otherwise remain cached after a staged rollout is
+        // promoted. A five-minute cohort URL plus no-cache headers makes rollout changes visible
+        // promptly without generating a unique CDN object for every app launch.
+        val metadataUrl = "$METADATA_URL?check=${System.currentTimeMillis() / 300_000L}"
+        val json = runCatching { fetch(metadataUrl) }.getOrNull() ?: return null
         val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
         val release = Release(
             o.optInt("versionCode"),
             o.optString("versionName").take(40),
             o.optString("packageName"),
-            o.optString("apkUrl"),
+            o.optString("apk").ifBlank { o.optString("apkUrl") },
             o.optString("sha256"),
             o.optString("notes").take(4000),
             if (o.has("rolloutPercent")) o.optInt("rolloutPercent").coerceIn(0, 100) else 100
@@ -207,6 +211,9 @@ object Updater {
             connectTimeout = 15_000
             readTimeout = 15_000
             instanceFollowRedirects = true
+            useCaches = false
+            setRequestProperty("Cache-Control", "no-cache")
+            setRequestProperty("Pragma", "no-cache")
         }
         return try {
             check(connection.responseCode in 200..299) {

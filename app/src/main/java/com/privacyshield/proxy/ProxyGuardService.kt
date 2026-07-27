@@ -14,6 +14,7 @@ import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.privacyshield.proxy.core.BlackBoxBridge
+import com.privacyshield.proxy.core.ProfileStore
 import com.privacyshield.proxy.core.ProxyNode
 import com.privacyshield.proxy.core.ProxyTester
 import com.privacyshield.proxy.core.SecureFileStore
@@ -145,6 +146,12 @@ class ProxyGuardService : Service() {
         ARMED.clear()
         ARMED_LAST.clear()
         if (!SecureFileStore.exists(this, STATE_FILE)) return
+        val claimedTags = runCatching {
+            ProfileStore.load(this).flatMapTo(HashSet()) { it.config.bbMap.keys }
+        }.getOrElse {
+            failClosedGuardRestore(it)
+            return
+        }
         val encoded = runCatching { SecureFileStore.readText(this, STATE_FILE) }.getOrElse {
             failClosedGuardRestore(it)
             return
@@ -166,6 +173,10 @@ class ProxyGuardService : Service() {
                 if (tag != expectedTag || !node.isValid() || routeId.isBlank() || expectedExitIp.isBlank()) {
                     continue
                 }
+                // A monitor is meaningful only while the clone is still claimed by a saved list.
+                // Profile edits and cloud restores can otherwise resurrect an old monitor for a
+                // moved/deleted assignment and make it appear that the wrong clone was closed.
+                if (tag !in claimedTags) continue
                 val countryIso = item.optString("countryIso", "").lowercase()
                 val armed = Armed(node, tag, auth, userId, pkg, label, routeId, expectedExitIp, countryIso).apply {
                     state = "checking"
@@ -176,6 +187,7 @@ class ProxyGuardService : Service() {
                 ARMED[tag] = armed
                 ARMED_LAST[tag] = armed
             }
+            persistArmedState()
         }.onFailure {
             ARMED.clear()
             ARMED_LAST.clear()
@@ -233,24 +245,28 @@ class ProxyGuardService : Service() {
                 val r = ProxyTester.test(a.node, lookupMetadata = a.countryIso.isBlank())
                 a.nextTestAt = SystemClock.elapsedRealtime() + POLL_SECS * 1000L
                 if (r.ok) {
+                    val cloneRunning = BlackBoxBridge.isCloneRunning(
+                        this, a.auth, a.userId, a.pkg
+                    )
                     if (a.countryIso.isBlank() && r.countryIso.isNotBlank()) {
                         // Guard records created before country binding did not carry the verified
-                        // exit country. Upgrade the encrypted BlackBox assignment before allowing
-                        // another long-running session, so WhatsApp/Instagram no longer inherit
-                        // the physical phone's SIM country. setCloneProxy intentionally closes an
-                        // already-running clone; the user reopens it with the corrected identity.
-                        val migrated = BlackBoxBridge.setCloneProxy(
-                            this, a.auth, a.userId, a.pkg, a.node, r.countryIso
-                        )
-                        if (migrated.ok && migrated.routeId.isNotBlank()) {
-                            a.routeId = migrated.routeId
-                            a.countryIso = r.countryIso.lowercase()
-                            a.lastRouteCheckAt = 0L
-                            persistArmedState()
-                            alert(a, "${a.label} - proxy country updated to ${a.countryIso.uppercase()}. Re-open the app.")
-                            a.testing = false
-                            ui.post { updateNotif() }
-                            return@execute
+                        // exit country. Never rewrite that assignment while the user is inside the
+                        // clone because BlackBox must restart a process to apply a new identity.
+                        // Defer the migration until the clone is no longer running.
+                        if (!cloneRunning) {
+                            val migrated = BlackBoxBridge.setCloneProxy(
+                                this, a.auth, a.userId, a.pkg, a.node, r.countryIso
+                            )
+                            if (migrated.ok && migrated.routeId.isNotBlank()) {
+                                a.routeId = migrated.routeId
+                                a.countryIso = r.countryIso.lowercase()
+                                a.lastRouteCheckAt = 0L
+                                persistArmedState()
+                                alert(a, "${a.label} - proxy country updated to ${a.countryIso.uppercase()}.")
+                                a.testing = false
+                                ui.post { updateNotif() }
+                                return@execute
+                            }
                         }
                     }
                     // A healthy node is not enough: prove the exact running clone still holds the
@@ -258,26 +274,32 @@ class ProxyGuardService : Service() {
                     // Mobile/residential nodes may legitimately rotate exit IP inside one session,
                     // so route identity—not byte-for-byte IP pinning—is the isolation proof.
                     val routeDue = SystemClock.elapsedRealtime() - a.lastRouteCheckAt >= ROUTE_VERIFY_SECS * 1000L
-                    if (routeDue && BlackBoxBridge.isCloneRunning(this, a.auth, a.userId, a.pkg)) {
+                    if (routeDue && cloneRunning) {
                         val route = BlackBoxBridge.verifyRoute(
                             this, a.auth, a.userId, a.pkg, a.expectedExitIp
                         )
                         a.lastRouteCheckAt = SystemClock.elapsedRealtime()
-                        if (!route.ok || route.routeId != a.routeId || route.exitIp.isBlank()) {
-                            val endpointOnlyFailure = route.state == "EXIT_CHECK_FAILED" &&
-                                route.routeId == a.routeId
-                            if (endpointOnlyFailure && ++a.routeProbeStrikes < ROUTE_PROBE_STRIKES) {
-                                // The independently tested proxy is reachable and the native route
-                                // identity still matches. One third-party IP-check timeout is not a
-                                // confirmed leak or proxy failure, so keep the fail-closed tunnel and
-                                // verify again on the next pass instead of killing a healthy clone.
-                                a.lastRouteCheckAt = 0L
-                            } else {
-                                onRouteViolation(a, route.state.ifBlank { route.error.ifBlank { "route mismatch" } })
-                                a.testing = false
-                                ui.post { updateNotif() }
-                                return@execute
-                            }
+                        if (isConfirmedRouteIdentityViolation(a.routeId, route.routeId, route.state)) {
+                            val reason = listOf(route.state, route.error)
+                                .filter { it.isNotBlank() }
+                                .joinToString(": ")
+                                .ifBlank { "route mismatch" }
+                            onRouteViolation(a, reason)
+                            a.testing = false
+                            ui.post { updateNotif() }
+                            return@execute
+                        } else if (!route.ok || route.exitIp.isBlank()) {
+                            // Locale/timezone/sensor checks and third-party exit endpoints can be
+                            // temporarily unavailable while the exact assigned route is still
+                            // active. They are diagnostics, not proof of a direct-IP or cross-clone
+                            // route change. Keep the app open and retry on the next monitor pass.
+                            a.routeProbeStrikes++
+                            a.lastRouteCheckAt = 0L
+                            android.util.Log.w(
+                                "ProxyGuardService",
+                                "soft route verification failure kept open tag=${a.tag} " +
+                                    "route=${route.routeId} state=${route.state}"
+                            )
                         } else {
                             a.routeProbeStrikes = 0
                         }
@@ -322,6 +344,10 @@ class ProxyGuardService : Service() {
     }
 
     private fun onRouteViolation(a: Armed, reason: String) {
+        android.util.Log.e(
+            "ProxyGuardService",
+            "route violation tag=${a.tag} expectedRoute=${a.routeId} reason=$reason"
+        )
         BlackBoxBridge.stopClone(this, a.auth, a.userId, a.pkg)
         ARMED.remove(a.tag)
         ARMED_LAST.remove(a.tag)
@@ -424,7 +450,6 @@ class ProxyGuardService : Service() {
         private const val POLL_SECS = 60          // proxy re-test cadence while an app is open
         private const val ROUTE_VERIFY_SECS = 60  // heavier in-guest exit/guard proof
         private const val FAIL_STRIKES = 3        // tolerate two transient failures; route stays fail-closed
-        private const val ROUTE_PROBE_STRIKES = 4 // tolerate independent IP-check endpoint instability
         private const val STATE_FILE = "proxy_guard_state.sec"
         private const val FG_ID = 4801
         private const val CHANNEL = "proxy_guard"
@@ -432,6 +457,20 @@ class ProxyGuardService : Service() {
         const val ACTION_ARM = "com.privacyshield.proxy.GUARD_ARM"
         const val ACTION_DISARM = "com.privacyshield.proxy.GUARD_DISARM"
         const val ACTION_STOP_ALL = "com.privacyshield.proxy.GUARD_STOP_ALL"
+
+        /**
+         * Closing a running clone is reserved for proof that its configured route identity was
+         * removed or replaced. Geo/locale, sensor and external exit-check failures do not establish
+         * that condition and must never interrupt the user's active app session.
+         */
+        internal fun isConfirmedRouteIdentityViolation(
+            expectedRouteId: String,
+            observedRouteId: String,
+            state: String
+        ): Boolean = expectedRouteId.isBlank() ||
+            observedRouteId != expectedRouteId ||
+            state == "ROUTE_MISMATCH" ||
+            state == "CONFIG_MISSING"
 
         /** Live armed state, readable by MainActivity to render "connected" chips in the list. */
         val ARMED = ConcurrentHashMap<String, Armed>()
