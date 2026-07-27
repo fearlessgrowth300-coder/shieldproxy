@@ -81,5 +81,10 @@ jobs:
             "https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/app-releases/shieldproxy/latest.json"
           cp candidate.apk ShieldProxy.apk
           gh release upload latest ShieldProxy.apk --clobber --repo "$GITHUB_REPOSITORY"
-          gh release upload latest "stable.json#version.json" --clobber --repo "$GITHUB_REPOSITORY"
+          # "file#text" sets an asset's display LABEL; the asset is still named after the file.
+          # Uploading stable.json#version.json therefore published a stray stable.json asset and
+          # left version.json pointing at the previous release, so clients saw the new APK behind
+          # the old checksum and could not update at all. Copy to the real name instead.
+          cp stable.json version.json
+          gh release upload latest version.json --clobber --repo "$GITHUB_REPOSITORY"
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
