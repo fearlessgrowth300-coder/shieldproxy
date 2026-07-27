@@ -62,7 +62,10 @@ jobs:
             -H "x-upsert: true" \
             --data-binary @promoted.json \
             "$WRITE_URL"
-          gh release upload latest "promoted.json#version.json" --clobber --repo "$GITHUB_REPOSITORY"
+          # "file#text" sets a display LABEL, not the asset name, so this must copy to the real
+          # filename or version.json is left stale while the APK moves on.
+          cp promoted.json version.json
+          gh release upload latest version.json --clobber --repo "$GITHUB_REPOSITORY"
           curl --fail-with-body --silent --show-error --retry 3 \
             "https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/public/app-releases/shieldproxy/latest.json" \
             -o verified.json
