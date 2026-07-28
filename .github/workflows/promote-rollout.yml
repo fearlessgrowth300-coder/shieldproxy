@@ -70,3 +70,59 @@ jobs:
             "https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/public/app-releases/shieldproxy/latest.json" \
             -o verified.json
           cmp promoted.json verified.json
+
+      - name: Verify the published update chain end to end
+        shell: bash
+        env:
+          EXPECTED_VERSION_CODE: ${{ inputs.expected_version_code }}
+          EXPECTED_ROLLOUT_PERCENT: ${{ inputs.rollout_percent }}
+          SUPABASE_METADATA: https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/public/app-releases/shieldproxy/latest.json
+        run: |
+          # The step above proves only that Supabase stored what we sent it. It never re-reads the
+          # GitHub version.json asset that 07-24-onward builds actually consult, and never checks
+          # that the advertised APK still hashes to the advertised checksum. Changing a rollout
+          # percentage rewrites the very metadata clients gate on, so verify the whole chain the
+          # way a phone sees it rather than trusting our own upload.
+          curl --fail-with-body --silent --show-error --location --retry 5 --retry-all-errors \
+            -H 'Cache-Control: no-cache' \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/latest/version.json?check=$GITHUB_RUN_ID" \
+            -o published.json
+          curl --fail-with-body --silent --show-error --location --retry 5 --retry-all-errors \
+            "$SUPABASE_METADATA" -o supabase.json
+          python3 - <<'PY'
+          import hashlib, json, os, urllib.request
+          expected = int(os.environ["EXPECTED_VERSION_CODE"])
+          expected_rollout = int(os.environ["EXPECTED_ROLLOUT_PERCENT"])
+          published = json.load(open("published.json"))
+          supabase = json.load(open("supabase.json"))
+          failures = []
+          # Pre-07-24 builds read Supabase, later builds read GitHub. Both must agree or one whole
+          # generation of installs silently stops updating.
+          for source, meta in (("github", published), ("supabase", supabase)):
+              if meta.get("versionCode") != expected:
+                  failures.append(
+                      f"{source} metadata advertises versionCode {meta.get('versionCode')}, expected {expected}")
+              # This is the whole point of a rollout change, so it is the one value that must not
+              # be taken on trust. Absent field means 100 because that is how the client reads it.
+              actual_rollout = meta.get("rolloutPercent", 100)
+              if actual_rollout != expected_rollout:
+                  failures.append(
+                      f"{source} metadata advertises rolloutPercent {actual_rollout}, expected {expected_rollout}")
+          apk_url = published.get("apk", "")
+          digest = ""
+          if not apk_url.startswith("https://"):
+              failures.append(f"metadata apk url is not https: {apk_url!r}")
+          else:
+              with urllib.request.urlopen(apk_url) as response:
+                  digest = hashlib.sha256(response.read()).hexdigest()
+              if digest != published.get("sha256"):
+                  failures.append(
+                      f"{apk_url} hashes {digest} but metadata claims {published.get('sha256')}")
+          if failures:
+              raise SystemExit("published update chain is inconsistent:\n  " + "\n  ".join(failures))
+          print(
+              f"update chain verified: versionCode {expected}, "
+              f"rolloutPercent {expected_rollout}, sha256 {digest}")
+          if expected_rollout == 0:
+              print("NOTE: rolloutPercent is 0 - this update is now offered to NOBODY.")
+          PY
