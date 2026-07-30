@@ -58,6 +58,8 @@ class ProxyGuardService : Service() {
         @Volatile var lastRouteCheckAt = 0L
         @Volatile var routeProbeStrikes = 0  // endpoint outages are not route-identity failures
         @Volatile var testing = false
+        @Volatile var lastWarmAt = 0L        // elapsedRealtime of the last push-revival attempt
+        @Volatile var warmFailures = 0       // consecutive failures -> back off instead of looping
     }
 
     private lateinit var worker: HandlerThread
@@ -312,6 +314,11 @@ class ProxyGuardService : Service() {
                     a.state = "connected"
                     if (a.aliveSince == 0L) a.aliveSince = SystemClock.elapsedRealtime()
                     if (wasBad) alert(a, "✓ ${a.label} — proxy back online (${r.city.ifBlank { r.ip }}). Traffic resumed automatically.")
+                    // The route is proven healthy but the clone is gone: an OEM power manager killed
+                    // the container, taking the guest's push process with it, so messages silently
+                    // stopped arriving. Restart it here — only after the route checks above pass, so
+                    // a clone is never revived onto an unverified proxy.
+                    if (!cloneRunning) warmForPush(a)
                 } else if (r.reachableOnly) {
                     // Proxy socket answered but exit IP couldn't be confirmed — network wobble, don't
                     // kill yet, just don't reset the alive clock.
@@ -328,6 +335,41 @@ class ProxyGuardService : Service() {
                 a.testing = false
                 if (!destroyed) ui.post { updateNotif() }
             }
+        }
+    }
+
+    /**
+     * Bring a killed clone's push connection back so the user keeps receiving messages while the app
+     * is closed.
+     *
+     * Runs on the check worker, never the main thread: this is a synchronous ContentProvider call
+     * that has to start another app's process. It stays silent — reviving a background push socket is
+     * routine plumbing, and a notification per attempt would be pure noise.
+     *
+     * Backs off geometrically on repeated failure. Some devices kill the container the instant it
+     * starts, and retrying that every POLL_SECS forever would turn the guard into exactly the battery
+     * drain it exists to avoid. A single success resets the backoff.
+     */
+    private fun warmForPush(a: Armed) {
+        val now = SystemClock.elapsedRealtime()
+        val wait = WARM_RETRY_SECS * 1000L shl minOf(a.warmFailures, WARM_BACKOFF_STEPS)
+        if (a.lastWarmAt != 0L && now - a.lastWarmAt < wait) return
+        a.lastWarmAt = now
+        val warm = BlackBoxBridge.warmClone(this, a.auth, a.userId, a.pkg)
+        if (warm.ok) {
+            a.warmFailures = 0
+            if (!warm.alreadyRunning) {
+                android.util.Log.i(
+                    "ProxyGuardService",
+                    "restarted push for tag=${a.tag} after an external kill"
+                )
+            }
+        } else {
+            a.warmFailures++
+            android.util.Log.w(
+                "ProxyGuardService",
+                "could not restart push for tag=${a.tag} (attempt ${a.warmFailures}): ${warm.error}"
+            )
         }
     }
 
@@ -450,6 +492,8 @@ class ProxyGuardService : Service() {
         private const val POLL_SECS = 60          // proxy re-test cadence while an app is open
         private const val ROUTE_VERIFY_SECS = 60  // heavier in-guest exit/guard proof
         private const val FAIL_STRIKES = 3        // tolerate two transient failures; route stays fail-closed
+        private const val WARM_RETRY_SECS = 60    // base gap between push-revival attempts
+        private const val WARM_BACKOFF_STEPS = 5  // caps the geometric backoff at ~32 min
         private const val STATE_FILE = "proxy_guard_state.sec"
         private const val FG_ID = 4801
         private const val CHANNEL = "proxy_guard"
