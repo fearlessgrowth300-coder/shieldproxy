@@ -16,6 +16,8 @@ import java.io.StringWriter
 object CrashReporter {
     private const val QUEUE = "crash_queue.json"
     private const val MAX_QUEUED = 20
+    private const val THROTTLE_MS = 30 * 60 * 1000L   // one report per failing thing per 30 min
+    private val lastReported = HashMap<String, Long>()
     @Volatile private var appCtx: Context? = null
 
     fun install(ctx: Context) {
@@ -39,6 +41,10 @@ object CrashReporter {
             .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
             .put("android", Build.VERSION.RELEASE)
             .put("ver", appVersion(ctx))
+        enqueue(ctx, report)
+    }
+
+    private fun enqueue(ctx: Context, report: JSONObject) {
         val queue = readQueue(ctx)
         queue.put(report)
         // Keep only the most recent MAX_QUEUED so a crash loop can't fill storage.
@@ -46,6 +52,65 @@ object CrashReporter {
         for (i in maxOf(0, queue.length() - MAX_QUEUED) until queue.length()) trimmed.put(queue.get(i))
         SecureFileStore.writeText(ctx, QUEUE, trimmed.toString())
     }
+
+    /**
+     * Record a failure that is NOT a crash.
+     *
+     * Every serious defect found on real phones so far failed silently: a clone frozen on its logo, a
+     * route stuck on "Checking..." because its proxy answered nothing, a guard that was frozen by the
+     * OEM and simply stopped working. None of them threw in this app, so crash reporting saw nothing
+     * and each one had to be found with a cable attached to a handset. Reporting outcomes instead of
+     * only exceptions is what makes those visible without touching the phone.
+     *
+     * Same scrubbing rules as a crash: no account, no proxy, no credentials. [key] identifies what
+     * failed for throttling only and is never uploaded.
+     */
+    fun reportFailure(
+        ctx: Context,
+        kind: String,
+        detail: String,
+        key: String = kind,
+        extras: Map<String, Any?> = emptyMap()
+    ) {
+        runCatching {
+            // A dead proxy re-tests every 60s forever. Without this, one broken route would bury every
+            // other signal in the table and burn the user's data uploading the same line all day.
+            val now = System.currentTimeMillis()
+            synchronized(lastReported) {
+                val previous = lastReported["$kind|$key"]
+                if (previous != null && now - previous < THROTTLE_MS) return
+                lastReported["$kind|$key"] = now
+            }
+            val report = JSONObject()
+                .put("ts", now)
+                .put("kind", kind)
+                .put("detail", scrub(detail))
+                .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
+                .put("android", Build.VERSION.RELEASE)
+                .put("ver", appVersion(ctx))
+            // Low memory and aggressive OEM power management are the two things that make a fix work
+            // on one phone and fail on another, so carry enough to tell those cases apart in the data.
+            memoryFields(ctx).forEach { (k, v) -> report.put(k, v) }
+            // Scrub string extras too. Callers pass harmless values today, but nothing stops a
+            // future one passing an account label, and this is an upload path.
+            extras.forEach { (k, v) ->
+                report.put(k, if (v is String) scrub(v) else (v ?: JSONObject.NULL))
+            }
+            enqueue(ctx.applicationContext, report)
+        }
+    }
+
+    private fun memoryFields(ctx: Context): Map<String, Any> = runCatching {
+        val am = ctx.getSystemService(android.app.ActivityManager::class.java)
+            ?: return@runCatching emptyMap<String, Any>()
+        val info = android.app.ActivityManager.MemoryInfo()
+        am.getMemoryInfo(info)
+        mapOf(
+            "ramMb" to (info.totalMem / (1024 * 1024)),
+            "freeRamMb" to (info.availMem / (1024 * 1024)),
+            "lowMem" to info.lowMemory
+        )
+    }.getOrDefault(emptyMap())
 
     /** Redact everything that could identify an account or expose a proxy. Public for unit checks. */
     fun scrub(input: String): String {

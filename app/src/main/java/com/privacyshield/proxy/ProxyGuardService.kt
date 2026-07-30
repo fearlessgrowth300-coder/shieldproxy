@@ -15,6 +15,7 @@ import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.privacyshield.proxy.core.BlackBoxBridge
+import com.privacyshield.proxy.core.CrashReporter
 import com.privacyshield.proxy.core.ProfileStore
 import com.privacyshield.proxy.core.ProxyNode
 import com.privacyshield.proxy.core.ProxyTester
@@ -426,6 +427,15 @@ class ProxyGuardService : Service() {
                 "ProxyGuardService",
                 "could not restart push for tag=${a.tag} (attempt ${a.warmFailures}): ${warm.error}"
             )
+            // Report only once the retries have genuinely given up, so a phone that is briefly busy
+            // does not look like a broken install.
+            if (a.warmFailures == WARM_REPORT_AFTER) {
+                CrashReporter.reportFailure(
+                    this, "clone_push_unrecoverable", warm.error,
+                    key = a.tag,
+                    extras = mapOf("pkg" to a.pkg, "userId" to a.userId)
+                )
+            }
         }
     }
 
@@ -435,6 +445,14 @@ class ProxyGuardService : Service() {
      * the same sticky proxy returns.
      */
     private fun onProxyDead(a: Armed) {
+        // A route that never works is invisible until a user complains: it just sits there looking
+        // like it is still loading. Reporting it is what turns "one account is broken somehow" into a
+        // countable failure with the proxy's own error attached.
+        CrashReporter.reportFailure(
+            this, "route_down", a.lastError.ifBlank { "proxy unreachable" },
+            key = a.tag,
+            extras = mapOf("pkg" to a.pkg, "userId" to a.userId, "proxyType" to a.node.type)
+        )
         a.state = "down"
         a.city = ""; a.type = ""; a.ip = ""
         a.nextTestAt = SystemClock.elapsedRealtime() + POLL_SECS * 1000L
@@ -553,6 +571,7 @@ class ProxyGuardService : Service() {
         private const val WARM_RETRY_SECS = 60    // base gap between push-revival attempts
         private const val HEARTBEAT_SECS = 60     // alarm cadence; survives process freezing
         private const val WARM_BACKOFF_STEPS = 5  // caps the geometric backoff at ~32 min
+        private const val WARM_REPORT_AFTER = 3   // report only once retries have truly given up
         private const val STATE_FILE = "proxy_guard_state.sec"
         private const val FG_ID = 4801
         private const val CHANNEL = "proxy_guard"
