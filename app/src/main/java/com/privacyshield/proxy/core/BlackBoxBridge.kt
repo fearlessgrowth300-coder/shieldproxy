@@ -13,6 +13,10 @@ data class BbProxyAssignment(
     val ok: Boolean, val routeId: String = "", val state: String = "", val error: String = ""
 )
 
+data class BbWarmResult(
+    val ok: Boolean, val alreadyRunning: Boolean = false, val error: String = ""
+)
+
 data class BbRouteVerification(
     val ok: Boolean, val routeId: String = "", val exitIp: String = "",
     val state: String = "", val error: String = "", val latencyMs: Long = 0L,
@@ -332,6 +336,28 @@ object BlackBoxBridge {
         val r = ctx.contentResolver.call(baseFor(authority), "stopApp", null, extras)
         r?.getBoolean("ok") == true
     } catch (_: Exception) { false }
+
+    /**
+     * Restart a killed clone's own push connection, with no visible UI.
+     *
+     * OEM power managers SIGKILL the whole container process group when its task leaves Recents,
+     * which takes the guest's push process with it (Instagram's :fbns, WhatsApp's socket) — so the
+     * user simply stops receiving messages. Nothing inside the container can repair that, because it
+     * dies in the same kill. ShieldProxy is a separate package and uid, so it survives; calling this
+     * provider is itself what brings the container back up.
+     */
+    fun warmClone(ctx: Context, authority: String, userId: Int, pkg: String): BbWarmResult = try {
+        val extras = android.os.Bundle().apply { putInt("userId", userId); putString("pkg", pkg) }
+        val r = ctx.contentResolver.call(baseFor(authority), "warmGuest", null, extras)
+        if (r == null) BbWarmResult(false, error = "The container did not respond")
+        else BbWarmResult(
+            r.getBoolean("ok"),
+            r.getBoolean("alreadyRunning"),
+            r.getString("err").orEmpty()
+        )
+    } catch (e: Exception) {
+        BbWarmResult(false, error = e.message ?: e.javaClass.simpleName)
+    }
 
     /** Is this clone's process currently alive? Lets the guard nag/kill only when in use. */
     fun isCloneRunning(ctx: Context, authority: String, userId: Int, pkg: String): Boolean = try {
