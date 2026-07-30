@@ -93,6 +93,7 @@ jobs:
         shell: bash
         env:
           EXPECTED_VERSION_CODE: ${{ inputs.expected_version_code }}
+          EXPECTED_ROLLOUT_PERCENT: ${{ inputs.rollout_percent }}
           SUPABASE_METADATA: https://oqyrbdvehvqdcpglaojo.supabase.co/storage/v1/object/public/app-releases/shieldproxy/latest.json
         run: |
           # A promotion is only real when what clients READ matches what they DOWNLOAD. Those two
@@ -110,6 +111,7 @@ jobs:
           python3 - <<'PY'
           import hashlib, json, os, urllib.request
           expected = int(os.environ["EXPECTED_VERSION_CODE"])
+          expected_rollout = int(os.environ["EXPECTED_ROLLOUT_PERCENT"])
           published = json.load(open("published.json"))
           supabase = json.load(open("supabase.json"))
           failures = []
@@ -117,6 +119,15 @@ jobs:
               if meta.get("versionCode") != expected:
                   failures.append(
                       f"{source} metadata advertises versionCode {meta.get('versionCode')}, expected {expected}")
+              # A chain can be flawlessly checksummed and still reach NOBODY. Updater.check()
+              # treats rolloutPercent <= 0 as "no update available", and publish-update.yml
+              # forces 0 for beta channel builds, so a promotion that fails to lift the staged
+              # percentage is invisible to every install instead of merely wrong. Absent field
+              # means 100 here because that is exactly how the client reads it.
+              actual_rollout = meta.get("rolloutPercent", 100)
+              if actual_rollout != expected_rollout:
+                  failures.append(
+                      f"{source} metadata advertises rolloutPercent {actual_rollout}, expected {expected_rollout}")
           apk_url = published.get("apk", "")
           digest = ""
           if not apk_url.startswith("https://"):
@@ -129,5 +140,9 @@ jobs:
                       f"{apk_url} hashes {digest} but metadata claims {published.get('sha256')}")
           if failures:
               raise SystemExit("published update chain is inconsistent:\n  " + "\n  ".join(failures))
-          print(f"update chain verified: versionCode {expected}, sha256 {digest}")
+          print(
+              f"update chain verified: versionCode {expected}, "
+              f"rolloutPercent {expected_rollout}, sha256 {digest}")
+          if expected_rollout == 0:
+              print("NOTE: rolloutPercent is 0 - this update is offered to NOBODY by design.")
           PY
