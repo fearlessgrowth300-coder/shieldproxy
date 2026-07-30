@@ -1,5 +1,6 @@
 package com.privacyshield.proxy
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -60,6 +61,7 @@ class ProxyGuardService : Service() {
         @Volatile var testing = false
         @Volatile var lastWarmAt = 0L        // elapsedRealtime of the last push-revival attempt
         @Volatile var warmFailures = 0       // consecutive failures -> back off instead of looping
+        @Volatile var lastError = ""         // newest probe error, shown before the strike limit
     }
 
     private lateinit var worker: HandlerThread
@@ -81,7 +83,43 @@ class ProxyGuardService : Service() {
         restoreArmedState()
         startForeground(FG_ID, buildNotification())
         ui.post(ticker)
+        scheduleHeartbeat()
     }
+
+    /**
+     * Wake the guard from outside its own process.
+     *
+     * The 1s [ticker] is a Handler loop, so it only runs while this process is scheduled. OEM power
+     * managers freeze the whole process shortly after it leaves the foreground — measured on Transsion
+     * as `mIsHiber=true, mHiberReason='frozen', mLruReason='fg-service'`, i.e. frozen *despite* holding
+     * a foreground service, a SYSTEM_ALLOW_LISTED grant and a battery-optimisation exemption. A frozen
+     * process runs no handlers, so the ticker silently stops and the guard stops checking anything
+     * while still showing a healthy (but stale) notification.
+     *
+     * An alarm is the way through: the platform must thaw a process to deliver one. This is therefore
+     * the load-bearing schedule, and the ticker is only a live countdown for the visible UI.
+     */
+    private fun scheduleHeartbeat() {
+        if (destroyed) return
+        val am = getSystemService(AlarmManager::class.java) ?: return
+        val at = System.currentTimeMillis() + HEARTBEAT_SECS * 1000L
+        try {
+            // Exact delivery needs a user-granted permission on API 31+; inexact still thaws us, so
+            // degrade rather than demand it. Either way ...AllowWhileIdle survives Doze.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms()) {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, heartbeatIntent())
+            } else {
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, heartbeatIntent())
+            }
+        } catch (_: SecurityException) {
+            runCatching { am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, heartbeatIntent()) }
+        }
+    }
+
+    private fun heartbeatIntent(): PendingIntent = PendingIntent.getForegroundService(
+        this, 7, Intent(this, ProxyGuardService::class.java).setAction(ACTION_HEARTBEAT),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -127,6 +165,16 @@ class ProxyGuardService : Service() {
                 }
                 if (ARMED.isEmpty()) { stopSelf(); return START_NOT_STICKY }
                 updateNotif()
+            }
+            ACTION_HEARTBEAT -> {
+                // Delivered by AlarmManager, which thaws this process first. Run one real pass here
+                // and immediately chain the next alarm, so the guard keeps checking (and reviving
+                // killed clones) even while the OEM keeps the process frozen between wake-ups.
+                if (ARMED.isNotEmpty()) {
+                    runTests()
+                    updateNotif()
+                }
+                scheduleHeartbeat()
             }
             ACTION_STOP_ALL -> {
                 ARMED.clear()
@@ -308,6 +356,7 @@ class ProxyGuardService : Service() {
                     }
                     val wasBad = a.state == "down" || a.state == "recovering"
                     a.strikes = 0
+                    a.lastError = ""
                     if (r.city.isNotBlank()) a.city = r.city
                     if (r.type.isNotBlank()) a.type = r.type
                     a.ip = r.ip
@@ -321,9 +370,16 @@ class ProxyGuardService : Service() {
                     if (!cloneRunning) warmForPush(a)
                 } else if (r.reachableOnly) {
                     // Proxy socket answered but exit IP couldn't be confirmed — network wobble, don't
-                    // kill yet, just don't reset the alive clock.
+                    // kill yet, just don't reset the alive clock. Still surface it: leaving the row on
+                    // "Checking…" made an unverifiable route look like one that was merely still loading.
+                    a.lastError = r.error.ifBlank { "exit IP unconfirmed" }
                 } else {
                     a.strikes++
+                    // Show the real reason on the FIRST failure. The strike counter still governs when
+                    // the route is declared down, but it must not govern what the user is told: a proxy
+                    // that fails every attempt would otherwise sit on "Checking…" indefinitely, which is
+                    // indistinguishable from "still loading" and hides a completely dead route.
+                    a.lastError = r.error.ifBlank { "proxy unreachable" }
                     if (a.strikes >= FAIL_STRIKES && a.state != "down" && a.state != "recovering") {
                         onProxyDead(a)
                     }
@@ -421,7 +477,9 @@ class ProxyGuardService : Service() {
                     "🟡 ${a.label} — proxy recovering; network paused · rechecking in ${secs}s"
                 }
                 "down" -> "🔴 ${a.label} — proxy unavailable; app network paused, route retained."
-                else -> "⏳ ${a.label} — checking…"
+                else -> if (a.lastError.isNotBlank())
+                    "⚠️ ${a.label} — ${a.lastError} · retry ${a.strikes}/$FAIL_STRIKES"
+                else "⏳ ${a.label} — checking…"
             }
         }
         val title = if (ARMED.size == 1) "Proxy guard — 1 clone" else "Proxy guard — ${ARMED.size} clones"
@@ -493,6 +551,7 @@ class ProxyGuardService : Service() {
         private const val ROUTE_VERIFY_SECS = 60  // heavier in-guest exit/guard proof
         private const val FAIL_STRIKES = 3        // tolerate two transient failures; route stays fail-closed
         private const val WARM_RETRY_SECS = 60    // base gap between push-revival attempts
+        private const val HEARTBEAT_SECS = 60     // alarm cadence; survives process freezing
         private const val WARM_BACKOFF_STEPS = 5  // caps the geometric backoff at ~32 min
         private const val STATE_FILE = "proxy_guard_state.sec"
         private const val FG_ID = 4801
@@ -501,6 +560,7 @@ class ProxyGuardService : Service() {
         const val ACTION_ARM = "com.privacyshield.proxy.GUARD_ARM"
         const val ACTION_DISARM = "com.privacyshield.proxy.GUARD_DISARM"
         const val ACTION_STOP_ALL = "com.privacyshield.proxy.GUARD_STOP_ALL"
+        const val ACTION_HEARTBEAT = "com.privacyshield.proxy.GUARD_HEARTBEAT"
 
         /**
          * Closing a running clone is reserved for proof that its configured route identity was
@@ -566,7 +626,9 @@ class ProxyGuardService : Service() {
                 "connected" -> "🟢 Connected${if (a.city.isNotBlank()) " · ${a.city}" else ""}${if (a.type.isNotBlank()) " · ${a.type}" else ""}"
                 "recovering" -> "🟡 Proxy recovering — network paused"
                 "down" -> "🔴 Proxy unavailable — network paused"
-                else -> "⏳ Checking…"
+                // Report a failing probe on the home card immediately. A route that never connects
+                // once used to read "Checking…" forever, so a dead proxy was invisible to the user.
+                else -> if (a.lastError.isNotBlank()) "⚠️ ${a.lastError}" else "⏳ Checking…"
             }
         }
 

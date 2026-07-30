@@ -19,6 +19,7 @@ import com.privacyshield.proxy.core.AppList
 import com.privacyshield.proxy.core.BlackBoxBridge
 import com.privacyshield.proxy.core.Profile
 import com.privacyshield.proxy.core.ProfileStore
+import com.privacyshield.proxy.core.SetupHealth
 import com.privacyshield.proxy.core.ProxyLibrary
 import com.privacyshield.proxy.core.RoutingConfig
 import com.privacyshield.proxy.core.SecureFileStore
@@ -48,6 +49,8 @@ class MainActivity : AppCompatActivity() {
     companion object {
         // Only prompt for an update once per app process.
         private var updateChecked = false
+        // Same for the background-delivery checklist: remind, don't nag.
+        private var setupChecked = false
     }
 
     private val driveFolderPicker =
@@ -185,6 +188,47 @@ class MainActivity : AppCompatActivity() {
             return
         }
         refresh()
+        maybeShowSetupHealth()
+    }
+
+    /**
+     * Show what still has to be allowed for clones to receive messages while closed.
+     *
+     * This existed only inside [startProfile] before, so it was reached exclusively by whole-phone VPN
+     * users. Anyone running clones taps "Open apps" and never starts the engine, so they were never
+     * asked for a background exemption at all — and then lost messages with nothing explaining why.
+     * Checking on resume covers both kinds of user.
+     */
+    private fun maybeShowSetupHealth() {
+        if (setupChecked) return
+        setupChecked = true
+        val issues = try { SetupHealth.issues(this) } catch (_: Exception) { return }
+        if (issues.isEmpty()) return
+        val brand = SetupHealth.brandName()
+        val why = if (brand != null)
+            "$brand closes or freezes background apps, so your clones stop receiving messages once " +
+                "they are closed. Two or three quick settings stop that:\n\n"
+        else
+            "To keep receiving your clones' messages while their apps are closed:\n\n"
+        val body = issues.mapIndexed { i, issue -> "${i + 1}. ${issue.title}\n${issue.detail}" }
+            .joinToString("\n\n")
+        val fixable = issues.firstOrNull { it.fix != null }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Finish setup for background messages")
+            .setMessage(why + body)
+            .apply {
+                if (fixable != null) {
+                    setPositiveButton("Open settings") { _, _ ->
+                        try { startActivity(fixable.fix) } catch (_: Exception) {
+                            toast("Could not open that settings page on this phone")
+                        }
+                    }
+                    setNegativeButton("Later", null)
+                } else {
+                    setPositiveButton("Got it", null)
+                }
+            }
+            .show()
     }
 
     private fun refresh() {
