@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -14,7 +15,10 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.privacyshield.proxy.core.BlackBoxBridge
 import com.privacyshield.proxy.core.CloudSync
+import com.privacyshield.proxy.core.CrashPrivacy
 import com.privacyshield.proxy.core.DriveFolderStore
+import com.privacyshield.proxy.core.KillSwitchStore
+import com.privacyshield.proxy.core.SensitiveAppStore
 import com.privacyshield.proxy.core.Supabase
 import com.privacyshield.proxy.core.VaultKeyStore
 
@@ -71,6 +75,10 @@ class AccountSettingsActivity : AppCompatActivity() {
         root.addView(actionButton("Back up proxies and routes to Drive") { emit(ACTION_BACKUP) })
         root.addView(actionButton("Restore proxies and routes from Drive") { emit(ACTION_RESTORE) })
 
+        root.addView(sectionLabel("Route isolation"))
+        root.addView(actionButton(killSwitchLabel()) { toggleKillSwitch(it as Button) })
+        root.addView(actionButton(crashPrivacyLabel()) { toggleCrashPrivacy(it as Button) })
+        root.addView(actionButton("Apps that cannot share a virtual user") { editSensitiveApps() })
         root.addView(sectionLabel("Security checks"))
         root.addView(actionButton("Leak test (DNS / IPv6 / proxy)") {
             startActivity(Intent(this, LeakTestActivity::class.java))
@@ -85,6 +93,43 @@ class AccountSettingsActivity : AppCompatActivity() {
         root.addView(actionButton("Back") { finish() })
         setContentView(ScrollView(this).apply { addView(root) })
         verifyBlackBoxConnection()
+    }
+
+    private fun killSwitchLabel(): String =
+        if (KillSwitchStore.isEnabled(this)) "Kill switch: on (closes a clone when its route fails)"
+        else "Kill switch: off (a failed route stays open with traffic paused)"
+
+    private fun toggleKillSwitch(button: Button) {
+        KillSwitchStore.setEnabled(this, !KillSwitchStore.isEnabled(this))
+        button.text = killSwitchLabel()
+    }
+
+    private fun crashPrivacyLabel(): String =
+        if (CrashPrivacy.includeDeviceDetails(this)) "Crash reports include device model and clone ids"
+        else "Crash reports omit device model and clone ids"
+
+    private fun toggleCrashPrivacy(button: Button) {
+        CrashPrivacy.setIncludeDeviceDetails(this, !CrashPrivacy.includeDeviceDetails(this))
+        button.text = crashPrivacyLabel()
+    }
+
+    private fun editSensitiveApps() {
+        val input = EditText(this).apply {
+            setText(SensitiveAppStore.extra(this@AccountSettingsActivity).sorted().joinToString("\n"))
+            hint = "One extra package per line, for example com.telegram.messenger"
+            minLines = 4
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Do not share a virtual user")
+            .setMessage("Instagram and WhatsApp are always included. Add other packages that must each have their own Blackbox user.")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val extra = input.text.toString().lines().map { it.trim() }.filter { it.contains('.') }.toSet()
+                SensitiveAppStore.setExtra(this, extra)
+                toast("Saved ${extra.size} extra package(s).")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun verifyBlackBoxConnection() {

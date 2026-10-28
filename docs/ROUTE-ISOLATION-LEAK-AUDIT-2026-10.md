@@ -6,6 +6,17 @@ Question: on one phone running ShieldProxy next to Blackbox, how can route 1's t
 
 This system is **not leak-free**. Several linking channels are visible in this repo. The channels that would actually carry a clone's packets (the in-guest hook, and any hev-socks5-tunnel) are **not in this repo**, so their behavior is unverified.
 
+## Status after the 2026-10-28 fixes
+
+| Item | Status | Why |
+| --- | --- | --- |
+| 1. Route enforcement | Partial | This repo now writes every `bbMap` entry into the Mihomo config as its own loopback SOCKS listener, pins that listener to the node, and stops excluding Blackbox while a clone route exists. Container UID traffic that hits the TUN is `REJECT-DROP`. The hook that must dial `127.0.0.1:<port>` is not in this repo. The contract is `docs/BLACKBOX-CONNECT-HOOK-CONTRACT.md`. Until that hook ships, a clone can still miss the listener, and with the VPN down Android will still use the real network unless lockdown is on. |
+| 2. Kill switch | Fixed in this repo | Default on. Proxy death, `LEAK_GUARD_FAILED`, `GEO_GUARD_FAILED`, `EXIT_CHECK_FAILED`, a failed `verifyRoute`, and an in-guest exit IP that differs from the armed exit all call `stopClone`. Settings has an explicit opt-out. The manifest text matches that. There is no separate freeze API; the clone is stopped. Needs a phone test to confirm Blackbox actually exits. |
+| 3. Transport | Partial | `tls` is on the proxy, in the Mihomo node, and in `setCloneProxy` / `assignAndVerifyRoute`. SOCKS-over-TLS or HTTPS is done by Mihomo on the listener's upstream, which only matters once the hook uses that listener. Two routes that share a server+username or a provider `package-<id>` are rejected, except one node shared by a single opted-in GMS user. The phone's radio still sees both tunnels. |
+| 4. Geo consistency | Partial | Profile save, direct Blackbox assign, and `launchClone` all send country, city, region, latitude, longitude, timezone, and a locale derived from the exit country. The privacy scan reports kernel, sensor, exit match, and "Launch blocked" only when that block is stored and `launchClone` checks it. Blackbox still has to apply the timezone, locale, and GPS. That code is not here. |
+| 5. Shared identity | Fixed in this repo | Keep-alive is a per-clone checkbox and defaults off. Existing per-user flags are copied onto clones that already exist, then new clones stay off. The "one virtual user" rule still always includes Instagram and WhatsApp, and Settings can add more packages. A confirmed `sharedGmsActive` from Blackbox still forces one proxy for that user. |
+| 6. Backend | Partial | `SupaSync` encrypts `proxies.json`, `profiles.json`, and `routing.json` with an Android Keystore key that is not uploaded. Old plaintext blobs still restore and are rewritten encrypted on the next push. Crash reports omit device model, Blackbox user id, and package name unless Settings opts in. `supabase/schema.sql` tightens RLS (authenticated only, `FORCE ROW LEVEL SECURITY`, anon revoked) and deletes `shieldbox_backup_key_v1` from `user_metadata`. That SQL has to be run in the Supabase SQL editor; this change does not apply it to the live project. The Drive recovery key still lives in `app_backups` so older Drive backups can be opened. A version-2 Supabase blob cannot be restored on a different phone. |
+
 ## How a route is built
 
 Two different paths exist, and they do not share a packet engine.

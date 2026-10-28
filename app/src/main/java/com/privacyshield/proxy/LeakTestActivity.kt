@@ -128,13 +128,18 @@ class LeakTestActivity : AppCompatActivity() {
                 .groupBy { it.identityDigest }
                 .filterValues { group -> group.map { "${it.target.authority}:${it.target.userId}" }.distinct().size > 1 }
                 .keys
+            for (digest in duplicateIdentities) {
+                val users = scanned.filter { it.identityDigest == digest }
+                    .map { "${it.target.authority}:${it.target.userId}" }
+                com.privacyshield.proxy.core.CloneIdentityBook.block(this, users)
+            }
             for (i in scanned.indices) {
                 val r = scanned[i]
                 if (r.identityDigest in duplicateIdentities) {
                     scanned[i] = r.copy(
                         level = 2,
                         headline = "Identity collision detected",
-                        detail = r.detail + "\nThis BlackBox user has the same protected identity as another user. Launch blocked until fixed."
+                        detail = com.privacyshield.proxy.core.ScanReport.identityLine(true) + "\n" + r.detail
                     )
                 }
             }
@@ -201,15 +206,30 @@ class LeakTestActivity : AppCompatActivity() {
                 "The proxy itself works, but the clone process did not prove the same exit. ${route.error}".trim(),
                 identity.digest, route.routeId)
         }
+        val exitMatched = route.exitIp.isNotBlank() && route.exitIp.equals(proxy.ip, ignoreCase = true)
+        if (!exitMatched) {
+            return CloneResult(t, 2, "In-guest exit did not match the proxy",
+                com.privacyshield.proxy.core.ScanReport.routeLine(false, route.exitIp.ifBlank { proxy.ip }),
+                identity.digest, route.routeId)
+        }
 
-        val warning = ipv6Open && !t.node.carriesUdp()
-        val location = proxy.city.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+        val guardsMissing = !route.kernelGuard || !route.sensorGuard
+        val warning = guardsMissing || (ipv6Open && !t.node.carriesUdp())
+        val detail = buildString {
+            append(com.privacyshield.proxy.core.ScanReport.routeLine(true, route.exitIp))
+            append("\n")
+            append(com.privacyshield.proxy.core.ScanReport.kernelLine(route.kernelGuard))
+            append("\n")
+            append(com.privacyshield.proxy.core.ScanReport.sensorLine(route.sensorGuard))
+            if (ipv6Open && !t.node.carriesUdp()) {
+                append("\nThis phone has IPv6. Clone IPv6 is rejected only while the VPN is up and the container UID rule is loaded.")
+            }
+        }
         return CloneResult(
             t,
             if (warning) 1 else 0,
-            if (warning) "Verified with IPv6/UDP guard" else "Identity and route verified",
-            "Exit ${route.exitIp.ifBlank { proxy.ip }}$location · Remote DNS · Direct fallback blocked" +
-                " · Kernel ID isolated · Sensor calibration isolated",
+            if (guardsMissing) "Route verified, device guards incomplete" else "Identity and route verified",
+            detail,
             identity.digest,
             route.routeId
         )

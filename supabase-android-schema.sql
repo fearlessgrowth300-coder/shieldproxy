@@ -1,3 +1,7 @@
+-- LEGACY file for an older project. Do not apply this to the ShieldProxy
+-- production project. Production RLS, grants, and the user_metadata cleanup
+-- live in supabase/schema.sql.
+--
 -- Run this ONCE in your Supabase project's SQL editor
 -- (project pnhzsteoouhngjdgsfeh — the same one Privacy Shield uses).
 -- It adds the backup table used by the BlackBox + ShieldProxy Android apps.

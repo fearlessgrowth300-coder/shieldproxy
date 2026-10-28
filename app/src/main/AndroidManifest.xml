@@ -74,7 +74,7 @@
             android:exported="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Monitors each clone's proxy and closes the app if the proxy drops" />
+                android:value="Stops a clone when its proxy drops or a leak, geo, or exit check fails, unless the kill switch is turned off" />
         </service>
 
         <service

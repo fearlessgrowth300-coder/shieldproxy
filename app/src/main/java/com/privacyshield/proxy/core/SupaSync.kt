@@ -4,13 +4,11 @@ import android.content.Context
 import org.json.JSONObject
 
 /**
- * Cloud sync via Supabase (replaces the Google Drive vault). The user's config — proxy library,
- * saved lists, active routing — is stored as ONE JSON blob per user in `public.app_backups`
- * (app='shieldproxy'), protected by per-user RLS.
+ * Cloud sync via Supabase. Proxy, profile, and routing files are encrypted on this device
+ * before they are uploaded. The AES key lives in the Android Keystore and is never uploaded.
  *
- * The blob holds the DECRYPTED file contents. That's deliberate: it makes restore independent of
- * the device Keystore / account-recovery key, so signing in on a new phone (or after a key change)
- * always brings the data back. Locally the same files stay encrypted at rest via [SecureFileStore].
+ * Version 1 blobs (plaintext files) still restore. The next push rewrites them as version 2.
+ * A version 2 blob cannot be opened on a different phone.
  */
 object SupaSync {
     /** The config files that define the user's setup. Local state/markers are not synced. */
@@ -20,13 +18,14 @@ object SupaSync {
     @Synchronized
     fun push(ctx: Context) {
         if (!Supabase.isSignedIn(ctx) || !VaultKeyStore.isReady(ctx)) return
-        val files = JSONObject()
+        val files = LinkedHashMap<String, String>()
         for (name in FILES) {
             val text = runCatching { SecureFileStore.readText(ctx, name) }.getOrNull() ?: continue
-            if (text.isNotEmpty()) files.put(name, text)
+            if (text.isNotEmpty()) files[name] = text
         }
-        if (files.length() == 0) return
-        Supabase.pushBackup(ctx, JSONObject().put("v", 1).put("files", files).toString())
+        if (files.isEmpty()) return
+        val sealed = CloudBackupCrypto.seal(files, DeviceCloudKey.get(ctx))
+        Supabase.pushBackup(ctx, sealed)
     }
 
     /** Pull the config from Supabase and write it locally (re-encrypted with this device's key).
@@ -35,10 +34,11 @@ object SupaSync {
     fun pull(ctx: Context): Boolean {
         if (!Supabase.isSignedIn(ctx) || !VaultKeyStore.isReady(ctx)) return false
         val raw = Supabase.pullBackup(ctx) ?: return false
-        val files = JSONObject(raw).optJSONObject("files") ?: return false
+        val opened = runCatching { CloudBackupCrypto.open(raw, DeviceCloudKey.get(ctx)) }.getOrNull()
+            ?: return false
         var restored = false
         for (name in FILES) {
-            val text = files.optString(name, "")
+            val text = opened.files[name].orEmpty()
             if (text.isNotEmpty()) { SecureFileStore.writeText(ctx, name, text); restored = true }
         }
         return restored

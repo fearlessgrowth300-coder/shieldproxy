@@ -96,7 +96,10 @@ class ShieldVpnService : VpnService() {
         // re-establish with the newly-activated profile's config.
         if (running) stopEngineOnly()
         val cfg = try {
-            RoutingConfig.load(this)
+            val active = RoutingConfig.load(this)
+            val saved = runCatching { com.privacyshield.proxy.core.ProfileStore.load(this) }
+                .getOrDefault(emptyList())
+            com.privacyshield.proxy.core.EngineRoutes.merge(active, saved.map { it.config })
         } catch (e: Exception) {
             lastError = "Protected routing data could not be unlocked"
             stopSelf()
@@ -125,16 +128,15 @@ class ShieldVpnService : VpnService() {
         } catch (_: Exception) {
         }
 
-        // CRITICAL: exclude the BlackBox container variants. Their clones route through their OWN
-        // per-clone proxy (the container's native connect() redirect). If this VPN also captured
-        // the container's traffic, it would hijack the clones' proxy connections (DNS -> fake-ip)
-        // and break them (ConnectException). Excluding them lets the whole-phone VPN and per-clone
-        // proxies run at the same time without conflict.
-        for (container in listOf(
-            "top.niunaijun.blackbox", "com.novspace.box",
-            "app.cloudvault.multi", "io.prismhub.clone"
-        )) {
-            try { builder.addDisallowedApplication(container) } catch (_: Exception) {}
+        // Clone routes are enforced inside this tunnel. The hook dials 127.0.0.1:<port>, which
+        // never enters the TUN. Everything else from the container UID is captured and rejected
+        // by the UID rule, so a missed socket cannot use the phone network.
+        // When no clone route is configured, leave the containers excluded so Blackbox's own
+        // UI traffic is not rewritten by fake-ip.
+        if (cfg.bbMap.isEmpty()) {
+            for (container in com.privacyshield.proxy.core.CloneListeners.CONTAINER_PACKAGES) {
+                try { builder.addDisallowedApplication(container) } catch (_: Exception) {}
+            }
         }
 
         val pfd = try {

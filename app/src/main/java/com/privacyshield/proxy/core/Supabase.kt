@@ -29,6 +29,7 @@ object Supabase {
     private const val PREFS = "sb_session"
     private const val BACKUP_KEY_FIELD = "shieldbox_backup_key_v1"
     private const val RECOVERY_KEY_APP = "_shieldbox_recovery_key_v1"
+    private const val LEGACY_KEY_PREFS = "legacy_recovery_key"
     private const val PENDING_LOGOUT_PREFS = "sb_pending_logout"
     private const val CLOCK_SKEW_SECONDS = 30L
     private const val VALIDATION_MAX_AGE_MS = 120_000L
@@ -175,8 +176,9 @@ object Supabase {
      */
     fun getOrCreateBackupKey(ctx: Context): ByteArray = getBackupKeyCandidates(ctx).first()
 
-    /** Canonical recovery key followed by any older metadata key still needed to unlock data
-     * created before cross-app atomic provisioning was introduced. */
+    /** Canonical recovery key followed by any older key still needed to unlock Drive backups.
+     *  A legacy `user_metadata` copy is moved into the account row and a device-local seal,
+     *  then removed from the metadata claim so it stops riding inside the access token. */
     @Synchronized
     fun getBackupKeyCandidates(ctx: Context): List<ByteArray> {
         fun decodeLegacy(user: JSONObject): ByteArray? = runCatching {
@@ -186,8 +188,9 @@ object Supabase {
         }.getOrNull()
 
         val legacy = decodeLegacy(getCurrentUser(ctx))
+        val remembered = readRememberedLegacyKey(ctx)
         val primary = runCatching {
-            val candidate = legacy ?: ByteArray(32).also(SecureRandom()::nextBytes)
+            val candidate = legacy ?: remembered ?: ByteArray(32).also(SecureRandom()::nextBytes)
             val row = JSONObject().put("app", RECOVERY_KEY_APP).put("data",
                 JSONObject().put("key", Base64.encodeToString(candidate, Base64.NO_WRAP)))
             restInsertIgnore(ctx, "$URL/rest/v1/app_backups?on_conflict=user_id,app", "[$row]")
@@ -204,20 +207,47 @@ object Supabase {
             // private auth metadata. A temporary REST/schema outage must not lock those users out
             // of files that can still be authenticated with that exact key. New accounts remain
             // fail-closed because they have no previously provisioned key to fall back to.
-            legacy?.let {
+            val fallback = legacy ?: remembered
+            if (fallback != null) {
+                rememberLegacyKey(ctx, fallback)
                 android.util.Log.w("ShieldKeyRecovery",
-                    "Atomic recovery-key store unavailable; using verified legacy candidate (${failure.javaClass.simpleName})")
-                return listOf(it)
+                    "Atomic recovery-key store unavailable; using device-held legacy candidate (${failure.javaClass.simpleName})")
+                return listOf(fallback)
             }
             throw IllegalStateException("Could not verify the account recovery key", failure)
         }
+        if (legacy != null) {
+            rememberLegacyKey(ctx, legacy)
+            clearLegacyRecoveryKey(ctx)
+        }
+        val localLegacy = readRememberedLegacyKey(ctx)
         android.util.Log.i("ShieldKeyRecovery",
-            "Server recovery keys: legacyPresent=${legacy != null}; legacyMatchesPrimary=${legacy?.contentEquals(primary) == true}")
+            "Server recovery keys: legacyPresent=${legacy != null}; legacyMatchesPrimary=${localLegacy?.contentEquals(primary) == true}")
         return buildList {
-            // Existing accounts encrypted their first backups with the metadata key. Preserve it
-            // as primary when present; the atomic row remains the fallback for newer accounts.
-            legacy?.let(::add)
+            // Existing Drive backups were encrypted with the metadata key. Keep that exact
+            // material first when we still hold it on this device.
+            localLegacy?.let(::add)
             if (none { it.contentEquals(primary) }) add(primary)
+        }
+    }
+
+    private fun rememberLegacyKey(ctx: Context, key: ByteArray) {
+        val sealed = SessionCrypto.seal(ctx, Base64.encodeToString(key, Base64.NO_WRAP))
+        ctx.getSharedPreferences(LEGACY_KEY_PREFS, Context.MODE_PRIVATE)
+            .edit().putString("key", sealed).apply()
+    }
+
+    private fun readRememberedLegacyKey(ctx: Context): ByteArray? = runCatching {
+        val sealed = ctx.getSharedPreferences(LEGACY_KEY_PREFS, Context.MODE_PRIVATE)
+            .getString("key", null)
+        Base64.decode(SessionCrypto.open(ctx, sealed), Base64.NO_WRAP).takeIf { it.size == 32 }
+    }.getOrNull()
+
+    /** Best-effort. schema.sql also deletes the claim for every user. */
+    private fun clearLegacyRecoveryKey(ctx: Context) {
+        runCatching {
+            authorizedPut(ctx, "$URL/auth/v1/user",
+                JSONObject().put("data", JSONObject().put(BACKUP_KEY_FIELD, "")).toString())
         }
     }
 
