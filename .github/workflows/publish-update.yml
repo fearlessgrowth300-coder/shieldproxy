@@ -49,6 +49,11 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # v3's default is "tools platform-tools". Google no longer serves the
+          # obsolete tools package, so sdkmanager exits 1. cmdline-tools already
+          # provides sdkmanager; only platform-tools is required here.
+          packages: platform-tools
 
       - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
