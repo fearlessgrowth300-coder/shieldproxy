@@ -52,6 +52,8 @@ object SetupHealth {
     fun issues(ctx: Context): List<Issue> {
         val out = mutableListOf<Issue>()
 
+        vpnLockdownIssue(ctx)?.let { out += it }
+
         if (!isBatteryExempt(ctx)) {
             out += Issue(
                 "Allow ShieldProxy to run in the background",
@@ -84,6 +86,25 @@ object SetupHealth {
             )
         }
         return out
+    }
+
+    /** Always-on VPN and lockdown are per Android user. A work profile has its own Settings page. */
+    fun vpnLockdownIssue(ctx: Context): Issue? {
+        val profile = AndroidProfile.current(ctx)
+        val app = runCatching {
+            Settings.Secure.getString(ctx.contentResolver, "always_on_vpn_app")
+        }.getOrNull()
+        val lockdown = runCatching {
+            Settings.Secure.getString(ctx.contentResolver, "always_on_vpn_lockdown")
+        }.getOrNull()
+        if (app == ctx.packageName && lockdown == "1") return null
+        return Issue(
+            if (profile.managed) "Turn on Always-on VPN in this work profile"
+            else "Turn on Always-on VPN for this profile",
+            AndroidProfile.vpnGuidance(profile.managed) +
+                " The kill switch (Settings) is stored only in this profile and defaults to on.",
+            Intent(Settings.ACTION_VPN_SETTINGS)
+        )
     }
 
     /**

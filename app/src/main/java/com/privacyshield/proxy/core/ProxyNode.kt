@@ -54,6 +54,10 @@ data class ProxyNode(
     /** True if this proxy uses a rotatable sticky session we can refresh. */
     fun hasRotatableSession(): Boolean = sessionId() != null
 
+    /** Provider customer id embedded by SOAX-style usernames (`package-349957`). */
+    fun providerPackageId(): String? =
+        Regex("(?:^|[-_])package-(\\d+)").find(username)?.groupValues?.get(1)
+
     /** Country embedded by providers such as SOAX (`country-us`). Used only as a fallback when
      * the live exit-IP metadata service cannot return a country. */
     fun countryIsoHint(): String = Regex("(?:^|[-_])country[-_]?([A-Za-z]{2})(?:[-_]|$)")

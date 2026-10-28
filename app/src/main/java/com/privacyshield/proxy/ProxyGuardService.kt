@@ -306,7 +306,8 @@ class ProxyGuardService : Service() {
                         // Defer the migration until the clone is no longer running.
                         if (!cloneRunning) {
                             val migrated = BlackBoxBridge.setCloneProxy(
-                                this, a.auth, a.userId, a.pkg, a.node, r.countryIso
+                                this, a.auth, a.userId, a.pkg, a.node,
+                                geo = com.privacyshield.proxy.core.RouteGeo.fromTest(r, a.node.countryIsoHint())
                             )
                             if (migrated.ok && migrated.routeId.isNotBlank()) {
                                 a.routeId = migrated.routeId
@@ -330,11 +331,19 @@ class ProxyGuardService : Service() {
                             this, a.auth, a.userId, a.pkg, a.expectedExitIp
                         )
                         a.lastRouteCheckAt = SystemClock.elapsedRealtime()
-                        if (isConfirmedRouteIdentityViolation(a.routeId, route.routeId, route.state)) {
+                        val killSwitch = com.privacyshield.proxy.core.KillSwitchStore.isEnabled(this)
+                        if (shouldStopClone(
+                                killSwitch, a.routeId, route.routeId, route.state,
+                                a.expectedExitIp, route.exitIp, route.ok && route.exitIp.isNotBlank()
+                            )) {
                             val reason = listOf(route.state, route.error)
                                 .filter { it.isNotBlank() }
                                 .joinToString(": ")
-                                .ifBlank { "route mismatch" }
+                                .ifBlank {
+                                    if (route.exitIp.isNotBlank() && route.exitIp != a.expectedExitIp)
+                                        "exit ${route.exitIp} != armed ${a.expectedExitIp}"
+                                    else "route check failed"
+                                }
                             onRouteViolation(a, reason)
                             a.testing = false
                             ui.post { updateNotif() }
@@ -362,6 +371,9 @@ class ProxyGuardService : Service() {
                     if (r.type.isNotBlank()) a.type = r.type
                     a.ip = r.ip
                     a.state = "connected"
+                    com.privacyshield.proxy.core.ProfileStatus.note(
+                        this, r.ip, a.node.server, a.node.port, a.node.username
+                    )
                     if (a.aliveSince == 0L) a.aliveSince = SystemClock.elapsedRealtime()
                     if (wasBad) alert(a, "✓ ${a.label} — proxy back online (${r.city.ifBlank { r.ip }}). Traffic resumed automatically.")
                     // The route is proven healthy but the clone is gone: an OEM power manager killed
@@ -369,7 +381,7 @@ class ProxyGuardService : Service() {
                     // stopped arriving. Restart it here — only after the route checks above pass, so
                     // a clone is never revived onto an unverified proxy.
                     if (!cloneRunning) warmForPush(a)
-                } else if (r.reachableOnly) {
+                } else if (r.reachableOnly && !com.privacyshield.proxy.core.KillSwitchStore.isEnabled(this)) {
                     // Proxy socket answered but exit IP couldn't be confirmed — network wobble, don't
                     // kill yet, just don't reset the alive clock. Still surface it: leaving the row on
                     // "Checking…" made an unverifiable route look like one that was merely still loading.
@@ -380,7 +392,12 @@ class ProxyGuardService : Service() {
                     // the route is declared down, but it must not govern what the user is told: a proxy
                     // that fails every attempt would otherwise sit on "Checking…" indefinitely, which is
                     // indistinguishable from "still loading" and hides a completely dead route.
-                    a.lastError = r.error.ifBlank { "proxy unreachable" }
+                    // With the kill switch on, an unconfirmed exit counts as a failure and the clone
+                    // is stopped once the strike limit is reached.
+                    a.lastError = when {
+                        r.reachableOnly -> r.error.ifBlank { "exit IP unconfirmed" }
+                        else -> r.error.ifBlank { "proxy unreachable" }
+                    }
                     if (a.strikes >= FAIL_STRIKES && a.state != "down" && a.state != "recovering") {
                         onProxyDead(a)
                     }
@@ -448,15 +465,28 @@ class ProxyGuardService : Service() {
         // A route that never works is invisible until a user complains: it just sits there looking
         // like it is still loading. Reporting it is what turns "one account is broken somehow" into a
         // countable failure with the proxy's own error attached.
+        // Package name and Blackbox user id stay out of the upload unless the user opts in.
         CrashReporter.reportFailure(
             this, "route_down", a.lastError.ifBlank { "proxy unreachable" },
             key = a.tag,
             extras = mapOf("pkg" to a.pkg, "userId" to a.userId, "proxyType" to a.node.type)
         )
+        if (proxyFailureShouldStop(
+                com.privacyshield.proxy.core.KillSwitchStore.isEnabled(this),
+                a.strikes,
+                FAIL_STRIKES
+            )) {
+            BlackBoxBridge.stopClone(this, a.auth, a.userId, a.pkg)
+            ARMED.remove(a.tag)
+            ARMED_LAST.remove(a.tag)
+            persistArmedState()
+            alert(a, "${a.label} — proxy unreachable. App CLOSED. Turn off the kill switch in Settings to keep it open with traffic paused.")
+            return
+        }
         a.state = "down"
         a.city = ""; a.type = ""; a.ip = ""
         a.nextTestAt = SystemClock.elapsedRealtime() + POLL_SECS * 1000L
-        alert(a, "${a.label} — proxy temporarily unreachable. App remains open; network is paused with no direct fallback.")
+        alert(a, "${a.label} — proxy temporarily unreachable. Kill switch is off, so the app stays open with traffic paused.")
     }
 
     private fun onRouteViolation(a: Armed, reason: String) {
@@ -594,6 +624,36 @@ class ProxyGuardService : Service() {
             observedRouteId != expectedRouteId ||
             state == "ROUTE_MISMATCH" ||
             state == "CONFIG_MISSING"
+
+        /**
+         * Kill switch on (the default): stop the clone when the route id changed, the in-guest
+         * check failed, the exit IP does not match the armed exit, or geo/leak guards failed.
+         * Kill switch off: only a changed or missing route id stops the clone.
+         */
+        internal fun shouldStopClone(
+            killSwitchEnabled: Boolean,
+            expectedRouteId: String,
+            observedRouteId: String,
+            state: String,
+            expectedExitIp: String,
+            observedExitIp: String,
+            routeOk: Boolean
+        ): Boolean {
+            val identityBroken = isConfirmedRouteIdentityViolation(
+                expectedRouteId, observedRouteId, state
+            )
+            if (!killSwitchEnabled) return identityBroken
+            if (identityBroken) return true
+            if (state == "GEO_GUARD_FAILED" || state == "EXIT_CHECK_FAILED" || state == "LEAK_GUARD_FAILED") {
+                return true
+            }
+            if (!routeOk) return true
+            return expectedExitIp.isNotBlank() && observedExitIp.isNotBlank() &&
+                !expectedExitIp.equals(observedExitIp, ignoreCase = true)
+        }
+
+        internal fun proxyFailureShouldStop(killSwitchEnabled: Boolean, strikes: Int, limit: Int): Boolean =
+            killSwitchEnabled && strikes >= limit
 
         /** Live armed state, readable by MainActivity to render "connected" chips in the list. */
         val ARMED = ConcurrentHashMap<String, Armed>()

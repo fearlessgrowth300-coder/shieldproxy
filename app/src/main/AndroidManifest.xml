@@ -74,7 +74,7 @@
             android:exported="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Monitors each clone's proxy and closes the app if the proxy drops" />
+                android:value="Stops a clone when its proxy drops or a leak, geo, or exit check fails, unless the kill switch is turned off" />
         </service>
 
         <service
@@ -103,7 +103,8 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- Signed two-way handshake used by BlackBox's Settings page. -->
+        <!-- Signed handshake for BlackBox in THIS Android user. Must not be singleUser:
+             a work profile has its own provider, session, and routes. -->
         <provider
             android:name=".core.ShieldBridgeProvider"
             android:authorities="com.privacyshield.proxy.bridge"

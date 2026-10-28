@@ -29,6 +29,7 @@ object Supabase {
     private const val PREFS = "sb_session"
     private const val BACKUP_KEY_FIELD = "shieldbox_backup_key_v1"
     private const val RECOVERY_KEY_APP = "_shieldbox_recovery_key_v1"
+    private const val LEGACY_KEY_PREFS = "legacy_recovery_key"
     private const val PENDING_LOGOUT_PREFS = "sb_pending_logout"
     private const val CLOCK_SKEW_SECONDS = 30L
     private const val VALIDATION_MAX_AGE_MS = 120_000L
@@ -175,8 +176,9 @@ object Supabase {
      */
     fun getOrCreateBackupKey(ctx: Context): ByteArray = getBackupKeyCandidates(ctx).first()
 
-    /** Canonical recovery key followed by any older metadata key still needed to unlock data
-     * created before cross-app atomic provisioning was introduced. */
+    /** Canonical recovery key followed by any older key still needed to unlock Drive backups.
+     *  A legacy `user_metadata` copy is moved into the account row and a device-local seal,
+     *  then removed from the metadata claim so it stops riding inside the access token. */
     @Synchronized
     fun getBackupKeyCandidates(ctx: Context): List<ByteArray> {
         fun decodeLegacy(user: JSONObject): ByteArray? = runCatching {
@@ -185,15 +187,18 @@ object Supabase {
                 .takeIf { it.size == 32 }
         }.getOrNull()
 
-        val legacy = decodeLegacy(getCurrentUser(ctx))
+        val legacy = if (AndroidProfile.userIdOf(android.os.Process.myUid()) == 0)
+            decodeLegacy(getCurrentUser(ctx)) else null
+        val remembered = readRememberedLegacyKey(ctx)
         val primary = runCatching {
-            val candidate = legacy ?: ByteArray(32).also(SecureRandom()::nextBytes)
-            val row = JSONObject().put("app", RECOVERY_KEY_APP).put("data",
+            val candidate = legacy ?: remembered ?: ByteArray(32).also(SecureRandom()::nextBytes)
+            val recoveryApp = AndroidProfile.current(ctx).backupApp(RECOVERY_KEY_APP)
+            val row = JSONObject().put("app", recoveryApp).put("data",
                 JSONObject().put("key", Base64.encodeToString(candidate, Base64.NO_WRAP)))
             restInsertIgnore(ctx, "$URL/rest/v1/app_backups?on_conflict=user_id,app", "[$row]")
 
             val response = restRead(ctx,
-                "$URL/rest/v1/app_backups?app=eq.$RECOVERY_KEY_APP&select=data&limit=1")
+                "$URL/rest/v1/app_backups?app=eq.$recoveryApp&select=data&limit=1")
                 ?: error("Could not read the account recovery key")
             val rows = org.json.JSONArray(response)
             require(rows.length() == 1) { "Could not create the account recovery key" }
@@ -204,20 +209,47 @@ object Supabase {
             // private auth metadata. A temporary REST/schema outage must not lock those users out
             // of files that can still be authenticated with that exact key. New accounts remain
             // fail-closed because they have no previously provisioned key to fall back to.
-            legacy?.let {
+            val fallback = legacy ?: remembered
+            if (fallback != null) {
+                rememberLegacyKey(ctx, fallback)
                 android.util.Log.w("ShieldKeyRecovery",
-                    "Atomic recovery-key store unavailable; using verified legacy candidate (${failure.javaClass.simpleName})")
-                return listOf(it)
+                    "Atomic recovery-key store unavailable; using device-held legacy candidate (${failure.javaClass.simpleName})")
+                return listOf(fallback)
             }
             throw IllegalStateException("Could not verify the account recovery key", failure)
         }
+        if (legacy != null) {
+            rememberLegacyKey(ctx, legacy)
+            clearLegacyRecoveryKey(ctx)
+        }
+        val localLegacy = readRememberedLegacyKey(ctx)
         android.util.Log.i("ShieldKeyRecovery",
-            "Server recovery keys: legacyPresent=${legacy != null}; legacyMatchesPrimary=${legacy?.contentEquals(primary) == true}")
+            "Server recovery keys: legacyPresent=${legacy != null}; legacyMatchesPrimary=${localLegacy?.contentEquals(primary) == true}")
         return buildList {
-            // Existing accounts encrypted their first backups with the metadata key. Preserve it
-            // as primary when present; the atomic row remains the fallback for newer accounts.
-            legacy?.let(::add)
+            // Existing Drive backups were encrypted with the metadata key. Keep that exact
+            // material first when we still hold it on this device.
+            localLegacy?.let(::add)
             if (none { it.contentEquals(primary) }) add(primary)
+        }
+    }
+
+    private fun rememberLegacyKey(ctx: Context, key: ByteArray) {
+        val sealed = SessionCrypto.seal(ctx, Base64.encodeToString(key, Base64.NO_WRAP))
+        ctx.getSharedPreferences(LEGACY_KEY_PREFS, Context.MODE_PRIVATE)
+            .edit().putString("key", sealed).apply()
+    }
+
+    private fun readRememberedLegacyKey(ctx: Context): ByteArray? = runCatching {
+        val sealed = ctx.getSharedPreferences(LEGACY_KEY_PREFS, Context.MODE_PRIVATE)
+            .getString("key", null)
+        Base64.decode(SessionCrypto.open(ctx, sealed), Base64.NO_WRAP).takeIf { it.size == 32 }
+    }.getOrNull()
+
+    /** Best-effort. schema.sql also deletes the claim for every user. */
+    private fun clearLegacyRecoveryKey(ctx: Context) {
+        runCatching {
+            authorizedPut(ctx, "$URL/auth/v1/user",
+                JSONObject().put("data", JSONObject().put(BACKUP_KEY_FIELD, "")).toString())
         }
     }
 
@@ -272,19 +304,49 @@ object Supabase {
         if (revoked) pending.edit().clear().commit()
     }
 
-    /** Push the app's whole config blob (upsert one row for this user). */
+    /** Drop a session that was copied into another Android user. Does not call the server,
+     *  so it cannot revoke the original profile's token. */
+    fun clearCopiedSession(ctx: Context) {
+        clearLocalSession(ctx)
+        ctx.getSharedPreferences(LEGACY_KEY_PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+    }
+
+    fun configApp(ctx: Context): String = AndroidProfile.current(ctx).backupApp("shieldproxy")
+
+    /** Push the app's whole config blob (upsert one row for this Android user). */
     fun pushBackup(ctx: Context, dataJson: String) {
-        val row = JSONObject().put("app", "shieldproxy").put("data", JSONObject(dataJson))
+        pushScoped(ctx, configApp(ctx), dataJson)
+    }
+
+    fun pushScoped(ctx: Context, app: String, dataJson: String) {
+        val row = JSONObject().put("app", app).put("data", JSONObject(dataJson))
         restWrite(ctx, "$URL/rest/v1/app_backups?on_conflict=user_id,app",
             "[" + row.toString() + "]")
     }
 
-    /** Pull this user's config blob, or null if none stored yet. */
+    /** Pull this Android user's config blob, or null if none stored yet. */
     fun pullBackup(ctx: Context): String? {
-        val resp = restRead(ctx, "$URL/rest/v1/app_backups?app=eq.shieldproxy&select=data") ?: return null
+        val app = configApp(ctx)
+        val resp = restRead(ctx, "$URL/rest/v1/app_backups?app=eq.$app&select=data") ?: return null
         val arr = org.json.JSONArray(resp)
         if (arr.length() == 0) return null
         return arr.getJSONObject(0).optJSONObject("data")?.toString()
+    }
+
+    fun pullExitMarks(ctx: Context): List<ExitOverlap.Mark> {
+        val resp = restRead(ctx, "$URL/rest/v1/app_backups?app=like.shieldproxy-exit-*&select=data")
+            ?: return emptyList()
+        val arr = org.json.JSONArray(resp)
+        val out = ArrayList<ExitOverlap.Mark>()
+        for (i in 0 until arr.length()) {
+            val data = arr.getJSONObject(i).optJSONObject("data") ?: continue
+            out.add(ExitOverlap.Mark(
+                data.optInt("androidUser", -1),
+                data.optString("exitIp"),
+                data.optString("proxyKey")
+            ))
+        }
+        return out
     }
 
     /**
@@ -296,7 +358,7 @@ object Supabase {
         if (reports.length() == 0) return true
         val rows = org.json.JSONArray()
         for (i in 0 until reports.length()) {
-            rows.put(JSONObject().put("app", "shieldproxy").put("report", reports.getJSONObject(i)))
+            rows.put(JSONObject().put("app", configApp(ctx)).put("report", reports.getJSONObject(i)))
         }
         return try {
             restWrite(ctx, "$URL/rest/v1/crash_reports", rows.toString())

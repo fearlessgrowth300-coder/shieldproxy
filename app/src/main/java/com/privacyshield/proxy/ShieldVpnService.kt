@@ -96,15 +96,20 @@ class ShieldVpnService : VpnService() {
         // re-establish with the newly-activated profile's config.
         if (running) stopEngineOnly()
         val cfg = try {
-            RoutingConfig.load(this)
+            val active = RoutingConfig.load(this)
+            val saved = runCatching { com.privacyshield.proxy.core.ProfileStore.load(this) }
+                .getOrDefault(emptyList())
+            com.privacyshield.proxy.core.EngineRoutes.merge(active, saved.map { it.config })
         } catch (e: Exception) {
             lastError = "Protected routing data could not be unlocked"
             stopSelf()
             return
         }
 
+        val androidUser = com.privacyshield.proxy.core.AndroidProfile.current(this)
         val builder = Builder()
-            .setSession("ShieldProxy")
+            .setSession(com.privacyshield.proxy.core.AndroidProfile.vpnSessionName(
+                androidUser.userId, androidUser.managed))
             .setMtu(9000)
             .addAddress("172.19.0.1", 30)
             .addRoute("0.0.0.0", 0)
@@ -119,22 +124,22 @@ class ShieldVpnService : VpnService() {
             builder.setBlocking(false)
         }
 
-        // Whole-device capture; never route our own traffic back in.
+        // addDisallowedApplication is resolved in this Android user only. The other
+        // profile's copy of a package has a different UID and is not affected.
         try {
             builder.addDisallowedApplication(packageName)
         } catch (_: Exception) {
         }
 
-        // CRITICAL: exclude the BlackBox container variants. Their clones route through their OWN
-        // per-clone proxy (the container's native connect() redirect). If this VPN also captured
-        // the container's traffic, it would hijack the clones' proxy connections (DNS -> fake-ip)
-        // and break them (ConnectException). Excluding them lets the whole-phone VPN and per-clone
-        // proxies run at the same time without conflict.
-        for (container in listOf(
-            "top.niunaijun.blackbox", "com.novspace.box",
-            "app.cloudvault.multi", "io.prismhub.clone"
-        )) {
-            try { builder.addDisallowedApplication(container) } catch (_: Exception) {}
+        // Clone routes are enforced inside this tunnel. The hook dials 127.0.0.1:<port>, which
+        // never enters the TUN. Everything else from the container UID is captured and rejected
+        // by the UID rule, so a missed socket cannot use the phone network.
+        // When no clone route is configured, leave the containers excluded so Blackbox's own
+        // UI traffic is not rewritten by fake-ip.
+        if (cfg.bbMap.isEmpty()) {
+            for (container in com.privacyshield.proxy.core.CloneListeners.CONTAINER_PACKAGES) {
+                try { builder.addDisallowedApplication(container) } catch (_: Exception) {}
+            }
         }
 
         val pfd = try {
@@ -156,7 +161,8 @@ class ShieldVpnService : VpnService() {
         val pm = packageManager
         val uidResolver: (String) -> Int? = { pkg ->
             try {
-                pm.getPackageUid(pkg, 0)
+                val uid = pm.getPackageUid(pkg, com.privacyshield.proxy.core.PackageQuery.FLAGS)
+                if (com.privacyshield.proxy.core.PackageQuery.sameUser(uid, androidUser.userId)) uid else null
             } catch (_: Exception) {
                 null
             }

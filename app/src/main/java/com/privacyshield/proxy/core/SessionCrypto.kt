@@ -12,7 +12,8 @@ import javax.crypto.spec.GCMParameterSpec
 
 /** Device-bound envelope encryption for login tokens and account identifiers. */
 object SessionCrypto {
-    private fun alias(ctx: Context) = ctx.packageName + ".supabase.session.v1"
+    private fun alias(ctx: Context) =
+        AndroidProfile.current(ctx).keyAlias(ctx.packageName + ".supabase.session.v1")
 
     fun seal(ctx: Context, value: String): String {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
