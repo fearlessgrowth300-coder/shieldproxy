@@ -240,13 +240,28 @@ class MainActivity : AppCompatActivity() {
             recoverProtectedDataAsync()
         }
         val on = ShieldVpnService.isRunning(this)
-        status.text = when {
+        val profile = com.privacyshield.proxy.core.AndroidProfile.current(this)
+        val base = profile.label + "\n" + when {
             protectedDataError != null -> "Locked · $protectedDataError"
             on -> "Protected · Engine on" + (ProfileStore.activeId(this)?.let { id ->
                 ProfileStore.get(this, id)?.let { " · ${it.name}" }
             } ?: "")
             lastError.isNotEmpty() -> "Needs attention · $lastError"
             else -> "Ready · Engine off"
+        }
+        status.text = base
+        val armed = ProxyGuardService.ARMED.values.firstOrNull { it.ip.isNotBlank() }
+        if (armed != null) {
+            Thread {
+                val extra = runCatching {
+                    com.privacyshield.proxy.core.ProfileStatus.warnings(
+                        this, armed.ip, armed.node.server, armed.node.port, armed.node.username
+                    )
+                }.getOrDefault(emptyList())
+                if (extra.isNotEmpty()) runOnUiThread {
+                    if (!isFinishing) status.text = base + "\n" + extra.joinToString("\n")
+                }
+            }.start()
         }
     }
 
@@ -350,10 +365,9 @@ class MainActivity : AppCompatActivity() {
             h.detail.text = "$proxyText\n$appNames" + (if (more > 0) " +$more more" else "") +
                     (if (guardLine != null) "\n$guardLine" else "")
 
-            // Clone-only lists route through the container (per-clone proxy), NOT this VPN — so they
-            // don't need Start and, crucially, don't conflict with each other (Android allows only
-            // ONE VPN, but any number of clone lists can run at once). Show "Open apps" for them so
-            // starting one never stops another.
+            // Clone-only lists still need this Android user's VpnService for the per-clone
+            // listeners. Android allows one VPN per user, so the work profile runs a second
+            // ShieldProxy with its own engine. "Open apps" starts that engine if it is down.
             val cloneOnly = p.config.bbMap.isNotEmpty() && p.config.appMap.isEmpty() &&
                     p.config.finalTarget == "DIRECT"
             if (cloneOnly) {

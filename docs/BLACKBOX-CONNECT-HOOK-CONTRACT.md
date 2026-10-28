@@ -28,6 +28,16 @@ For the clone identified by `userId` + `package`:
 6. Honor `setKeepAlive` per clone. The default from ShieldProxy is off. Do not install a shared GMS identity unless that clone was opted in.
 7. `verifyRoute` must report the exit IP actually observed inside the guest, plus `kernelGuard` and `sensorGuard` only when those isolations are really on. ShieldProxy compares that exit IP to the armed exit and stops the clone when they differ, unless the user has turned the kill switch off.
 
+## Work profile
+
+ShieldProxy is installed in both the personal user and the Android work profile. They are different Android users, so each has its own process, UID, `VpnService`, Mihomo home directory, preferences, Android Keystore keys, Supabase session, and backup row. User 0 keeps the historical row names `shieldproxy` and `_shieldbox_recovery_key_v1`. Any other user uses `shieldproxy-u<id>` and `_shieldbox_recovery_key_v1-u<id>`.
+
+The hook in a work profile must use the listener published by the ShieldProxy running in that same user. A listener on the personal user's `127.0.0.1` is not the work profile's loopback. Package queries and `addDisallowedApplication` apply only to the user whose VPN is up.
+
+Each profile needs its own Always-on VPN and "Block connections without VPN" under that profile's Settings → VPN. The kill switch is stored in that profile's app data and defaults to on.
+
+`tools/profile-instances.sh` and `tools/profile-instances.ps1` print each instance's user, UID, and last exit IP from logcat tag `ShieldProfile`.
+
 ## What this does not cover
 
 ShieldProxy does not ship the hook. A phone test has to show one clone's packets arriving on its own listener and the other clone's packets arriving on the other, and a socket that bypasses the hook dying with `ECONNREFUSED` rather than leaving from the phone's address. Always-on VPN lockdown is still a system setting this app cannot turn on by itself. While the VPN process is down, Android will send the container out the real network unless that setting is on.

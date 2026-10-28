@@ -43,7 +43,8 @@ class LeakTestActivity : AppCompatActivity() {
         val headline: String,
         val detail: String,
         val identityDigest: String = "",
-        val routeId: String = ""
+        val routeId: String = "",
+        val exitIp: String = ""
     )
 
     private lateinit var results: LinearLayout
@@ -71,7 +72,8 @@ class LeakTestActivity : AppCompatActivity() {
             setPadding(0, dp(4), 0, dp(18))
         })
         summary = TextView(this).apply {
-            text = "Ready to compare each BlackBox user without exposing private identifiers."
+            text = com.privacyshield.proxy.core.AndroidProfile.current(this@LeakTestActivity).label +
+                "\nReady to compare each BlackBox user without exposing private identifiers."
             textSize = 14f
             setTextColor(Color.parseColor("#D6E4EC"))
             setPadding(dp(16), dp(14), dp(16), dp(14))
@@ -146,7 +148,20 @@ class LeakTestActivity : AppCompatActivity() {
 
             val failures = scanned.count { it.level == 2 }
             val warnings = scanned.count { it.level == 1 }
+            val overlap = com.privacyshield.proxy.core.ProfileStatus.warningsFor(
+                this,
+                scanned.filter { it.exitIp.isNotBlank() }.map {
+                    com.privacyshield.proxy.core.ExitOverlap.Mark(
+                        com.privacyshield.proxy.core.AndroidProfile.current(this).userId,
+                        it.exitIp,
+                        com.privacyshield.proxy.core.ExitOverlap.proxyKey(
+                            it.target.node.server, it.target.node.port, it.target.node.username
+                        )
+                    )
+                }
+            )
             runOnUiThread {
+                addProfileCard(overlap)
                 addNetworkCard(realIp, ipv6Open)
                 scanned.forEach { addCloneCard(it) }
                 summary.text = when {
@@ -195,6 +210,9 @@ class LeakTestActivity : AppCompatActivity() {
             return CloneResult(t, 2, "Proxy exit equals the phone network",
                 "No usable route separation was detected.", identity.digest)
         }
+        com.privacyshield.proxy.core.ProfileStatus.note(
+            this, proxy.ip, t.node.server, t.node.port, t.node.username
+        )
 
         var route = BlackBoxBridge.verifyRoute(this, t.authority, t.userId, t.pkg, proxy.ip)
         if (!route.ok && route.state == "NOT_RUNNING") {
@@ -231,7 +249,30 @@ class LeakTestActivity : AppCompatActivity() {
             if (guardsMissing) "Route verified, device guards incomplete" else "Identity and route verified",
             detail,
             identity.digest,
-            route.routeId
+            route.routeId,
+            route.exitIp.ifBlank { proxy.ip }
+        )
+    }
+
+    private fun addProfileCard(overlap: List<String>) {
+        val profile = com.privacyshield.proxy.core.AndroidProfile.current(this)
+        val body = buildString {
+            append(profile.label)
+            append("\nUID ")
+            append(profile.uid)
+            append("\n")
+            append(com.privacyshield.proxy.core.AndroidProfile.vpnGuidance(profile.managed))
+            if (overlap.isEmpty()) {
+                append("\nNo other Android profile published the same exit. If the other ShieldProxy is not signed into this account, compare them with tools/profile-instances.sh.")
+            } else {
+                overlap.forEach { append("\n").append(it) }
+            }
+        }
+        addCard(
+            "This Android profile",
+            if (overlap.isEmpty()) "SEPARATE" else "SAME EXIT",
+            Color.parseColor(if (overlap.isEmpty()) "#4EE0B5" else "#FF7A86"),
+            body
         )
     }
 

@@ -106,8 +106,10 @@ class ShieldVpnService : VpnService() {
             return
         }
 
+        val androidUser = com.privacyshield.proxy.core.AndroidProfile.current(this)
         val builder = Builder()
-            .setSession("ShieldProxy")
+            .setSession(com.privacyshield.proxy.core.AndroidProfile.vpnSessionName(
+                androidUser.userId, androidUser.managed))
             .setMtu(9000)
             .addAddress("172.19.0.1", 30)
             .addRoute("0.0.0.0", 0)
@@ -122,7 +124,8 @@ class ShieldVpnService : VpnService() {
             builder.setBlocking(false)
         }
 
-        // Whole-device capture; never route our own traffic back in.
+        // addDisallowedApplication is resolved in this Android user only. The other
+        // profile's copy of a package has a different UID and is not affected.
         try {
             builder.addDisallowedApplication(packageName)
         } catch (_: Exception) {
@@ -158,7 +161,8 @@ class ShieldVpnService : VpnService() {
         val pm = packageManager
         val uidResolver: (String) -> Int? = { pkg ->
             try {
-                pm.getPackageUid(pkg, 0)
+                val uid = pm.getPackageUid(pkg, com.privacyshield.proxy.core.PackageQuery.FLAGS)
+                if (com.privacyshield.proxy.core.PackageQuery.sameUser(uid, androidUser.userId)) uid else null
             } catch (_: Exception) {
                 null
             }

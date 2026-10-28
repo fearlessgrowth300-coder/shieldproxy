@@ -15,7 +15,7 @@ object DeviceCloudKey {
 
     fun get(ctx: Context): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        val name = ctx.packageName + SUFFIX
+        val name = AndroidProfile.current(ctx).keyAlias(ctx.packageName + SUFFIX)
         (ks.getKey(name, null) as? SecretKey)?.let { return it }
         return javax.crypto.KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
             init(

@@ -187,16 +187,18 @@ object Supabase {
                 .takeIf { it.size == 32 }
         }.getOrNull()
 
-        val legacy = decodeLegacy(getCurrentUser(ctx))
+        val legacy = if (AndroidProfile.userIdOf(android.os.Process.myUid()) == 0)
+            decodeLegacy(getCurrentUser(ctx)) else null
         val remembered = readRememberedLegacyKey(ctx)
         val primary = runCatching {
             val candidate = legacy ?: remembered ?: ByteArray(32).also(SecureRandom()::nextBytes)
-            val row = JSONObject().put("app", RECOVERY_KEY_APP).put("data",
+            val recoveryApp = AndroidProfile.current(ctx).backupApp(RECOVERY_KEY_APP)
+            val row = JSONObject().put("app", recoveryApp).put("data",
                 JSONObject().put("key", Base64.encodeToString(candidate, Base64.NO_WRAP)))
             restInsertIgnore(ctx, "$URL/rest/v1/app_backups?on_conflict=user_id,app", "[$row]")
 
             val response = restRead(ctx,
-                "$URL/rest/v1/app_backups?app=eq.$RECOVERY_KEY_APP&select=data&limit=1")
+                "$URL/rest/v1/app_backups?app=eq.$recoveryApp&select=data&limit=1")
                 ?: error("Could not read the account recovery key")
             val rows = org.json.JSONArray(response)
             require(rows.length() == 1) { "Could not create the account recovery key" }
@@ -302,19 +304,49 @@ object Supabase {
         if (revoked) pending.edit().clear().commit()
     }
 
-    /** Push the app's whole config blob (upsert one row for this user). */
+    /** Drop a session that was copied into another Android user. Does not call the server,
+     *  so it cannot revoke the original profile's token. */
+    fun clearCopiedSession(ctx: Context) {
+        clearLocalSession(ctx)
+        ctx.getSharedPreferences(LEGACY_KEY_PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+    }
+
+    fun configApp(ctx: Context): String = AndroidProfile.current(ctx).backupApp("shieldproxy")
+
+    /** Push the app's whole config blob (upsert one row for this Android user). */
     fun pushBackup(ctx: Context, dataJson: String) {
-        val row = JSONObject().put("app", "shieldproxy").put("data", JSONObject(dataJson))
+        pushScoped(ctx, configApp(ctx), dataJson)
+    }
+
+    fun pushScoped(ctx: Context, app: String, dataJson: String) {
+        val row = JSONObject().put("app", app).put("data", JSONObject(dataJson))
         restWrite(ctx, "$URL/rest/v1/app_backups?on_conflict=user_id,app",
             "[" + row.toString() + "]")
     }
 
-    /** Pull this user's config blob, or null if none stored yet. */
+    /** Pull this Android user's config blob, or null if none stored yet. */
     fun pullBackup(ctx: Context): String? {
-        val resp = restRead(ctx, "$URL/rest/v1/app_backups?app=eq.shieldproxy&select=data") ?: return null
+        val app = configApp(ctx)
+        val resp = restRead(ctx, "$URL/rest/v1/app_backups?app=eq.$app&select=data") ?: return null
         val arr = org.json.JSONArray(resp)
         if (arr.length() == 0) return null
         return arr.getJSONObject(0).optJSONObject("data")?.toString()
+    }
+
+    fun pullExitMarks(ctx: Context): List<ExitOverlap.Mark> {
+        val resp = restRead(ctx, "$URL/rest/v1/app_backups?app=like.shieldproxy-exit-*&select=data")
+            ?: return emptyList()
+        val arr = org.json.JSONArray(resp)
+        val out = ArrayList<ExitOverlap.Mark>()
+        for (i in 0 until arr.length()) {
+            val data = arr.getJSONObject(i).optJSONObject("data") ?: continue
+            out.add(ExitOverlap.Mark(
+                data.optInt("androidUser", -1),
+                data.optString("exitIp"),
+                data.optString("proxyKey")
+            ))
+        }
+        return out
     }
 
     /**
@@ -326,7 +358,7 @@ object Supabase {
         if (reports.length() == 0) return true
         val rows = org.json.JSONArray()
         for (i in 0 until reports.length()) {
-            rows.put(JSONObject().put("app", "shieldproxy").put("report", reports.getJSONObject(i)))
+            rows.put(JSONObject().put("app", configApp(ctx)).put("report", reports.getJSONObject(i)))
         }
         return try {
             restWrite(ctx, "$URL/rest/v1/crash_reports", rows.toString())

@@ -2,6 +2,8 @@ package com.privacyshield.proxy
 
 import android.app.Application
 import com.privacyshield.proxy.core.CrashReporter
+import com.privacyshield.proxy.core.ProfileScopeGuard
+import com.privacyshield.proxy.core.ProfileStatus
 import com.privacyshield.proxy.core.Supabase
 
 /**
@@ -11,6 +13,8 @@ import com.privacyshield.proxy.core.Supabase
 class ShieldApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        ProfileScopeGuard.enforce(this)
+        ProfileStatus.note(this, "", "", 0, "")
         Supabase.retryPendingLogoutAsync(this)
         CrashReporter.install(this)
         CrashReporter.flushAsync(this)

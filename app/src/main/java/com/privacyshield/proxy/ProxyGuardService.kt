@@ -371,6 +371,9 @@ class ProxyGuardService : Service() {
                     if (r.type.isNotBlank()) a.type = r.type
                     a.ip = r.ip
                     a.state = "connected"
+                    com.privacyshield.proxy.core.ProfileStatus.note(
+                        this, r.ip, a.node.server, a.node.port, a.node.username
+                    )
                     if (a.aliveSince == 0L) a.aliveSince = SystemClock.elapsedRealtime()
                     if (wasBad) alert(a, "✓ ${a.label} — proxy back online (${r.city.ifBlank { r.ip }}). Traffic resumed automatically.")
                     // The route is proven healthy but the clone is gone: an OEM power manager killed
