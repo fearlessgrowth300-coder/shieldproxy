@@ -15,7 +15,14 @@ class ProbeActivity : Activity() {
         val port = intent.getIntExtra("port", 9)
         Thread {
             val result = runCatching {
-                Socket().use { it.connect(InetSocketAddress(host, port), 20_000) }
+                Socket().use { socket ->
+                    socket.connect(InetSocketAddress(host, port), 20_000)
+                    // Mihomo's gVisor stack can finish the local handshake before it
+                    // dials the proxy. Hold the socket so that dial is not cancelled.
+                    socket.getOutputStream().write(1)
+                    socket.getOutputStream().flush()
+                    Thread.sleep(5_000)
+                }
                 "ok $host $port"
             }.getOrElse { "fail ${it.javaClass.simpleName}:${it.message}" }
             Log.i("ProbeTraffic", result)

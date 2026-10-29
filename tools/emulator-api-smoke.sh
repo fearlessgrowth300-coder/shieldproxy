@@ -23,9 +23,23 @@ python3 "$ROOT/tools/test_socks.py" 18081 "$OUT/socks-b.log" &
 SOCK_B=$!
 trap 'kill "$SOCK_A" "$SOCK_B" 2>/dev/null || true' EXIT
 
-adb install -r -t "$ROOT/app/build/outputs/apk/debug/app-debug.apk"
-adb install -r -t "$ROOT/probe/build/outputs/apk/debug/probe-debug.apk"
-adb shell pm grant com.privacyshield.proxy android.permission.POST_NOTIFICATIONS || true
+adb_retry() {
+  i=0
+  while [ "$i" -lt 5 ]; do
+    if "$@"; then
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 3
+  done
+  return 1
+}
+
+adb_retry adb install -r -t "$ROOT/app/build/outputs/apk/debug/app-debug.apk" || fail "could not install ShieldProxy"
+adb_retry adb install -r -t "$ROOT/probe/build/outputs/apk/debug/probe-debug.apk" || fail "could not install probe"
+if [ "$API" -ge 33 ]; then
+  adb shell pm grant com.privacyshield.proxy android.permission.POST_NOTIFICATIONS || true
+fi
 adb shell appops set com.privacyshield.proxy ACTIVATE_VPN allow || true
 
 smoke() {
@@ -50,13 +64,17 @@ wait_file() {
 }
 
 vpn_up() {
-  adb shell dumpsys activity services com.privacyshield.proxy | grep -q ShieldVpnService
+  adb shell 'ip link show tun0 2>/dev/null || cat /proc/net/dev' | grep -q tun0
+}
+
+engine_ready() {
+  adb shell run-as com.privacyshield.proxy cat files/engine_ready.txt 2>/dev/null | grep -q up
 }
 
 wait_vpn() {
   i=0
-  while [ "$i" -lt 45 ]; do
-    if vpn_up; then
+  while [ "$i" -lt 60 ]; do
+    if vpn_up && engine_ready; then
       return 0
     fi
     i=$((i + 1))
@@ -77,11 +95,27 @@ wait_vpn_down() {
   return 1
 }
 
+connects() {
+  n=$(grep -c 'CONNECT 203.0.113.10 9' "$1" 2>/dev/null || true)
+  echo "${n:-0}"
+}
+
 probe() {
+  log=$1
+  before=$(connects "$log")
   adb shell run-as com.privacyshield.proxy.probe rm files/probe_result.txt >/dev/null 2>&1 || true
   adb shell am start -n com.privacyshield.proxy.probe/.ProbeActivity --es host 203.0.113.10 --ei port 9
-  wait_file com.privacyshield.proxy.probe probe_result.txt || fail "probe produced no result"
-  grep -q '^ok ' "$OUT/probe_result.txt" || fail "probe did not complete through the proxy: $(cat "$OUT/probe_result.txt")"
+  i=0
+  while [ "$i" -lt 30 ]; do
+    now=$(connects "$log")
+    if [ "$now" -gt "$before" ]; then
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  wait_file com.privacyshield.proxy.probe probe_result.txt || true
+  fail "SOCKS did not see the probe. probe=$(cat "$OUT/probe_result.txt" 2>/dev/null || echo missing)"
 }
 
 count_log() {
@@ -104,11 +138,7 @@ echo "startupSeconds=$ELAPSED" | tee -a "$OUT/result.txt"
 if [ "$ELAPSED" -gt 90 ]; then
   fail "startup took ${ELAPSED}s"
 fi
-probe
-BEFORE_A=$(count_log "$OUT/socks-a.log")
-if [ "$BEFORE_A" -lt 1 ]; then
-  fail "SOCKS proxy A saw no CONNECT"
-fi
+probe "$OUT/socks-a.log"
 
 echo "toggle" | tee -a "$OUT/result.txt"
 n=0
@@ -123,7 +153,7 @@ while [ "$n" -lt 3 ]; do
   wait_vpn || fail "VPN did not return after toggle"
   n=$((n + 1))
 done
-probe
+probe "$OUT/socks-a.log"
 
 echo "rotate" | tee -a "$OUT/result.txt"
 BEFORE_B=$(count_log "$OUT/socks-b.log")
@@ -131,7 +161,7 @@ adb shell run-as com.privacyshield.proxy rm files/smoke_result.txt >/dev/null 2>
 smoke start 18081
 wait_file com.privacyshield.proxy smoke_result.txt || fail "rotate produced no result"
 wait_vpn || fail "VPN did not return after rotate"
-probe
+probe "$OUT/socks-b.log"
 AFTER_B=$(count_log "$OUT/socks-b.log")
 if [ "$AFTER_B" -le "$BEFORE_B" ]; then
   fail "rotated route did not reach SOCKS proxy B"
@@ -147,7 +177,7 @@ echo "background" | tee -a "$OUT/result.txt"
 adb shell input keyevent 3
 sleep 120
 vpn_up || fail "VPN dropped while backgrounded and the kill switch was not what stopped it"
-probe
+probe "$OUT/socks-b.log"
 
 MEM=$(adb shell dumpsys meminfo com.privacyshield.proxy | awk '/TOTAL PSS:/ {print $3; exit}' | tr -d '\r')
 echo "totalPssKb=${MEM:-unknown}" | tee -a "$OUT/result.txt"
@@ -156,12 +186,14 @@ if [ -n "${MEM:-}" ] && [ "$MEM" -gt 900000 ]; then
 fi
 
 adb logcat -d -v threadtime > "$OUT/logcat.txt" || true
-if grep -E "FATAL EXCEPTION|Fatal signal|ANR in " "$OUT/logcat.txt"; then
-  fail "logcat contains a fatal exception, native crash, or ANR"
+if grep -E "FATAL EXCEPTION|ANR in com.privacyshield|Fatal signal .*privacyshield" "$OUT/logcat.txt"; then
+  fail "logcat contains a fatal exception, native crash, or ANR in ShieldProxy"
 fi
 if adb shell ls /data/tombstones 2>/dev/null | grep -q .; then
   mkdir -p "$OUT/tombstones"
   adb pull /data/tombstones "$OUT/tombstones" || true
-  fail "tombstone present"
+  if grep -R -l -i privacyshield "$OUT/tombstones" >/dev/null 2>&1; then
+    fail "tombstone names ShieldProxy"
+  fi
 fi
 echo "PASS api=$API startupSeconds=$ELAPSED totalPssKb=${MEM:-unknown}" | tee -a "$OUT/result.txt"

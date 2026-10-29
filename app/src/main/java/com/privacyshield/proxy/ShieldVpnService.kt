@@ -25,6 +25,12 @@ class ShieldVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
 
+    override fun onCreate() {
+        super.onCreate()
+        // Cold start of this process is what the foreground-service timer measures.
+        ForegroundStarts.start(this, NOTIF_ID, startingNotification(), ForegroundStarts.SPECIAL_USE)
+    }
+
     companion object {
         const val ACTION_START = "com.privacyshield.proxy.START"
         const val ACTION_STOP = "com.privacyshield.proxy.STOP"
@@ -95,7 +101,15 @@ class ShieldVpnService : VpnService() {
         }, WATCHDOG_MS)
     }
 
+    private fun markEngineReady(ready: Boolean) {
+        val marker = File(filesDir, "engine_ready.txt")
+        if (ready) marker.writeText("up") else marker.delete()
+    }
+
     private fun startTunnel() {
+        // Drop any stale marker before the new tun exists, so a waiter cannot
+        // treat the previous session as ready.
+        markEngineReady(false)
         // Switching lists: if already running, tear the engine down first and
         // re-establish with the newly-activated profile's config.
         if (running) stopEngineOnly()
@@ -230,6 +244,7 @@ class ShieldVpnService : VpnService() {
             return
         }
         running = true
+        markEngineReady(true)
     }
 
     /** Stop the engine + close the tun, but keep the service/foreground alive
@@ -244,6 +259,7 @@ class ShieldVpnService : VpnService() {
         } catch (_: Exception) {
         }
         tun = null
+        markEngineReady(false)
     }
 
     private fun stopTunnel() {

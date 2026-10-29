@@ -44,7 +44,9 @@ jobs:
           api-level: ${{ matrix.api-level }}
           arch: x86_64
           target: google_apis
-          disable-animations: true
+          # Skipping the post-boot animation settings avoids an adb broken-pipe
+          # that killed otherwise-booted API 30 and 36 emulators.
+          disable-animations: false
           ram-size: 2048
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics
