@@ -68,7 +68,9 @@ wait_file() {
 }
 
 vpn_up() {
-  adb_do adb shell 'ip link show tun0 2>/dev/null || cat /proc/net/dev' | grep -q tun0
+  # Match the interface row. "Device tun0 does not exist" also contains the name
+  # and made API 31 look like the VPN was still up after stop.
+  adb_do adb shell 'grep -q "^ *tun0:" /proc/net/dev'
 }
 
 wait_vpn() {
@@ -106,7 +108,7 @@ probe() {
   log=$1
   before=$(connects "$log")
   adb shell run-as com.privacyshield.proxy.probe rm files/probe_result.txt >/dev/null 2>&1 || true
-  adb shell am start -n com.privacyshield.proxy.probe/.ProbeActivity --es host 203.0.113.10 --ei port 9
+  adb shell am start -S -n com.privacyshield.proxy.probe/.ProbeActivity --es host 203.0.113.10 --ei port 9
   i=0
   while [ "$i" -lt 30 ]; do
     now=$(connects "$log")

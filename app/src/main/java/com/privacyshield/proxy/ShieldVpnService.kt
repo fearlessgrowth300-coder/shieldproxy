@@ -25,6 +25,7 @@ class ShieldVpnService : VpnService() {
     private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
     private var engineThread: android.os.HandlerThread? = null
     private var engine: android.os.Handler? = null
+    private var tun: ParcelFileDescriptor? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -185,10 +186,12 @@ class ShieldVpnService : VpnService() {
         if (pfd == null) {
             stopSelf(); return
         }
-        // Mihomo closes this fd on stop. detachFd drops the Java owner so a later
-        // ParcelFileDescriptor.close() cannot double-close it. API 30+ fdsan
-        // aborts the process on that, which killed the engine on API 33.
-        val tunFd = pfd.detachFd()
+        // Mihomo closes the fd it is given. A second owner stays here so stop
+        // can drop tun0 without closing Mihomo's fd (API 30+ fdsan aborts on
+        // a double-close of the same descriptor).
+        tun?.close()
+        tun = pfd
+        val tunFd = pfd.dup().detachFd()
 
         // Mihomo home dir holds config.yaml + downloaded geo/provider files.
         val home = File(filesDir, "mihomo").apply { mkdirs() }
@@ -276,6 +279,11 @@ class ShieldVpnService : VpnService() {
             MihomoCore.stop()
             running = false
         }
+        try {
+            tun?.close()
+        } catch (_: Exception) {
+        }
+        tun = null
         markEngineReady(null)
     }
 
