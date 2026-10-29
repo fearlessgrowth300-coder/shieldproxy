@@ -22,13 +22,20 @@ import java.io.File
  */
 class ShieldVpnService : VpnService() {
 
-    private var tun: ParcelFileDescriptor? = null
     private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
+    private var engineThread: android.os.HandlerThread? = null
+    private var engine: android.os.Handler? = null
 
     override fun onCreate() {
         super.onCreate()
         // Cold start of this process is what the foreground-service timer measures.
+        // Nothing else may run first: the emulator images have no KVM, and the
+        // main thread was still inside startTunnel when Android gave up on startup.
         ForegroundStarts.start(this, NOTIF_ID, startingNotification(), ForegroundStarts.SPECIAL_USE)
+        val thread = android.os.HandlerThread("shield-vpn")
+        thread.start()
+        engineThread = thread
+        engine = android.os.Handler(thread.looper)
     }
 
     companion object {
@@ -71,17 +78,24 @@ class ShieldVpnService : VpnService() {
         // startForegroundService() crashes if this returns before startForeground(),
         // and loading Mihomo can take longer than that window on a cold emulator.
         ForegroundStarts.start(this, NOTIF_ID, startingNotification(), ForegroundStarts.SPECIAL_USE)
-        if (intent?.action == ACTION_STOP) {
-            wantRunning = false
-            stopTunnel()
+        val action = intent?.action
+        if (action == ACTION_STOP) wantRunning = false else wantRunning = true
+        val handler = engine
+        if (handler == null) {
+            stopSelf()
             return START_NOT_STICKY
         }
-        // ACTION_START, or a START_STICKY restart after the process was killed
-        // (intent == null) — in that case revive from the persisted active profile.
-        wantRunning = true
-        startTunnel()
-        scheduleWatchdog()
-        return START_STICKY
+        handler.post {
+            if (action == ACTION_STOP) {
+                stopTunnel()
+                return@post
+            }
+            // ACTION_START, or a START_STICKY restart after the process was killed
+            // (intent == null) — in that case revive from the persisted active profile.
+            startTunnel()
+            scheduleWatchdog()
+        }
+        return if (action == ACTION_STOP) START_NOT_STICKY else START_STICKY
     }
 
     /** Periodically ensure the engine is actually alive; revive it if it died
@@ -93,23 +107,26 @@ class ShieldVpnService : VpnService() {
                 if (!wantRunning) return
                 if (!MihomoCore.running) {
                     // engine died on its own — rebuild the tunnel + restart Mihomo
-                    stopEngineOnly()
-                    startTunnel()
+                    engine?.post {
+                        if (!wantRunning) return@post
+                        stopEngineOnly()
+                        startTunnel()
+                    }
                 }
                 watchdog.postDelayed(this, WATCHDOG_MS)
             }
         }, WATCHDOG_MS)
     }
 
-    private fun markEngineReady(ready: Boolean) {
+    private fun markEngineReady(token: String?) {
         val marker = File(filesDir, "engine_ready.txt")
-        if (ready) marker.writeText("up") else marker.delete()
+        if (token == null) marker.delete() else marker.writeText(token)
     }
 
     private fun startTunnel() {
         // Drop any stale marker before the new tun exists, so a waiter cannot
         // treat the previous session as ready.
-        markEngineReady(false)
+        markEngineReady(null)
         // Switching lists: if already running, tear the engine down first and
         // re-establish with the newly-activated profile's config.
         if (running) stopEngineOnly()
@@ -168,7 +185,10 @@ class ShieldVpnService : VpnService() {
         if (pfd == null) {
             stopSelf(); return
         }
-        tun = pfd
+        // Mihomo closes this fd on stop. detachFd drops the Java owner so a later
+        // ParcelFileDescriptor.close() cannot double-close it. API 30+ fdsan
+        // aborts the process on that, which killed the engine on API 33.
+        val tunFd = pfd.detachFd()
 
         // Mihomo home dir holds config.yaml + downloaded geo/provider files.
         val home = File(filesDir, "mihomo").apply { mkdirs() }
@@ -200,7 +220,7 @@ class ShieldVpnService : VpnService() {
                 }
             }
         }
-        configFile.writeText(cfg.toClashYaml(pfd.fd, uidResolver, serverResolver))
+        configFile.writeText(cfg.toClashYaml(tunFd, uidResolver, serverResolver))
 
         ForegroundStarts.start(this, NOTIF_ID, buildNotification(cfg), ForegroundStarts.SPECIAL_USE)
 
@@ -244,7 +264,9 @@ class ShieldVpnService : VpnService() {
             return
         }
         running = true
-        markEngineReady(true)
+        val readyPort = cfg.nodes.firstOrNull { it.name == "emu" }?.port
+            ?: cfg.nodes.firstOrNull { it.isValid() }?.port
+        markEngineReady(readyPort?.toString() ?: "up")
     }
 
     /** Stop the engine + close the tun, but keep the service/foreground alive
@@ -254,12 +276,7 @@ class ShieldVpnService : VpnService() {
             MihomoCore.stop()
             running = false
         }
-        try {
-            tun?.close()
-        } catch (_: Exception) {
-        }
-        tun = null
-        markEngineReady(false)
+        markEngineReady(null)
     }
 
     private fun stopTunnel() {
@@ -273,14 +290,15 @@ class ShieldVpnService : VpnService() {
         // If the system is killing us but the user still wants routing, DON'T flip
         // wantRunning — START_STICKY will restart us and the watchdog revives the engine.
         watchdog.removeCallbacksAndMessages(null)
-        stopEngineOnly()
+        engine?.post { stopEngineOnly() }
+        engineThread?.quitSafely()
         super.onDestroy()
     }
 
     override fun onRevoke() {
         // User revoked VPN consent (or another VPN took over) — stop for real.
         wantRunning = false
-        stopTunnel()
+        engine?.post { stopTunnel() }
         super.onRevoke()
     }
 

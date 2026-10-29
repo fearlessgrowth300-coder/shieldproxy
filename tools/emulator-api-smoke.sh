@@ -23,6 +23,10 @@ python3 "$ROOT/tools/test_socks.py" 18081 "$OUT/socks-b.log" &
 SOCK_B=$!
 trap 'kill "$SOCK_A" "$SOCK_B" 2>/dev/null || true' EXIT
 
+adb_do() {
+  timeout 30 "$@"
+}
+
 adb_retry() {
   i=0
   while [ "$i" -lt 5 ]; do
@@ -35,8 +39,8 @@ adb_retry() {
   return 1
 }
 
-adb_retry adb install -r -t "$ROOT/app/build/outputs/apk/debug/app-debug.apk" || fail "could not install ShieldProxy"
-adb_retry adb install -r -t "$ROOT/probe/build/outputs/apk/debug/probe-debug.apk" || fail "could not install probe"
+adb_retry timeout 120 adb install -r -t "$ROOT/app/build/outputs/apk/debug/app-debug.apk" || fail "could not install ShieldProxy"
+adb_retry timeout 120 adb install -r -t "$ROOT/probe/build/outputs/apk/debug/probe-debug.apk" || fail "could not install probe"
 if [ "$API" -ge 33 ]; then
   adb shell pm grant com.privacyshield.proxy android.permission.POST_NOTIFICATIONS || true
 fi
@@ -64,17 +68,15 @@ wait_file() {
 }
 
 vpn_up() {
-  adb shell 'ip link show tun0 2>/dev/null || cat /proc/net/dev' | grep -q tun0
-}
-
-engine_ready() {
-  adb shell run-as com.privacyshield.proxy cat files/engine_ready.txt 2>/dev/null | grep -q up
+  adb_do adb shell 'ip link show tun0 2>/dev/null || cat /proc/net/dev' | grep -q tun0
 }
 
 wait_vpn() {
+  want=$1
   i=0
-  while [ "$i" -lt 60 ]; do
-    if vpn_up && engine_ready; then
+  while [ "$i" -lt 45 ]; do
+    got=$(adb_do adb shell run-as com.privacyshield.proxy cat files/engine_ready.txt 2>/dev/null | tr -d '\r\n ' || true)
+    if vpn_up && [ "$got" = "$want" ]; then
       return 0
     fi
     i=$((i + 1))
@@ -132,7 +134,7 @@ adb shell run-as com.privacyshield.proxy rm files/smoke_result.txt >/dev/null 2>
 smoke start 18080
 wait_file com.privacyshield.proxy smoke_result.txt || fail "smoke activity produced no result"
 grep -q '^started ' "$OUT/smoke_result.txt" || fail "VPN consent or startup failed: $(cat "$OUT/smoke_result.txt")"
-wait_vpn || fail "VPN service did not stay up"
+wait_vpn 18080 || fail "VPN service did not stay up"
 ELAPSED=$(( $(date +%s) - START ))
 echo "startupSeconds=$ELAPSED" | tee -a "$OUT/result.txt"
 if [ "$ELAPSED" -gt 90 ]; then
@@ -150,7 +152,7 @@ while [ "$n" -lt 3 ]; do
   adb shell run-as com.privacyshield.proxy rm files/smoke_result.txt >/dev/null 2>&1 || true
   smoke start 18080
   wait_file com.privacyshield.proxy smoke_result.txt || fail "restart produced no result"
-  wait_vpn || fail "VPN did not return after toggle"
+  wait_vpn 18080 || fail "VPN did not return after toggle"
   n=$((n + 1))
 done
 probe "$OUT/socks-a.log"
@@ -160,7 +162,7 @@ BEFORE_B=$(count_log "$OUT/socks-b.log")
 adb shell run-as com.privacyshield.proxy rm files/smoke_result.txt >/dev/null 2>&1 || true
 smoke start 18081
 wait_file com.privacyshield.proxy smoke_result.txt || fail "rotate produced no result"
-wait_vpn || fail "VPN did not return after rotate"
+wait_vpn 18081 || fail "VPN did not return after rotate"
 probe "$OUT/socks-b.log"
 AFTER_B=$(count_log "$OUT/socks-b.log")
 if [ "$AFTER_B" -le "$BEFORE_B" ]; then

@@ -86,6 +86,14 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
+            if (ciDebugSigning) {
+                // The emulator only runs x86_64. Shipping both arm builds makes a
+                // ~200MB APK, and a cold :vpn start was still inside zygote when
+                // the foreground-service deadline fired.
+                excludes += "lib/arm64-v8a/**"
+                excludes += "lib/armeabi-v7a/**"
+                excludes += "lib/x86/**"
+            }
         }
     }
 }
