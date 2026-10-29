@@ -38,18 +38,53 @@ jobs:
           chmod +x gradlew
           ./gradlew :app:assembleDebug :probe:assembleDebug -PciDebugSigning=true --no-daemon --max-workers=2
 
+      # ubuntu-latest exposes /dev/kvm, but the node is root:kvm 0660 until this
+      # rule runs. android-emulator-runner then reports hardware acceleration.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD snapshot cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-x86_64-google_apis-${{ matrix.api-level }}
+
+      - name: Create AVD snapshot for API ${{ matrix.api-level }}
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          arch: x86_64
+          target: google_apis
+          cores: 4
+          force-avd-creation: false
+          disable-animations: false
+          ram-size: 2048
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: echo "Generated AVD snapshot for caching."
+
       - name: Run the smoke test on API ${{ matrix.api-level }}
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api-level }}
           arch: x86_64
           target: google_apis
+          cores: 4
+          force-avd-creation: false
           # Skipping the post-boot animation settings avoids an adb broken-pipe
           # that killed otherwise-booted API 30 and 36 emulators.
           disable-animations: false
           ram-size: 2048
           emulator-boot-timeout: 900
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-metrics
+          # -no-snapshot-save keeps the cached snapshot from being rewritten.
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: tools/emulator-api-smoke.sh
 
       - name: Collect logcat and tombstones
