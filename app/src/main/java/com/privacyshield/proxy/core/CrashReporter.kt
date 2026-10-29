@@ -32,15 +32,19 @@ object CrashReporter {
 
     private fun capture(ctx: Context, thread: Thread, err: Throwable) {
         val trace = StringWriter().also { err.printStackTrace(PrintWriter(it)) }.toString()
-        val report = JSONObject()
-            .put("ts", System.currentTimeMillis())
-            .put("thread", thread.name)
-            .put("type", err.javaClass.name)
-            .put("msg", scrub(err.message ?: ""))
-            .put("stack", scrub(trace))
-            .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
-            .put("android", Build.VERSION.RELEASE)
-            .put("ver", appVersion(ctx))
+        val report = buildFailureReport(
+            kind = "crash",
+            detail = err.message ?: "",
+            version = appVersion(ctx),
+            androidRelease = Build.VERSION.RELEASE,
+            device = "${Build.MANUFACTURER} ${Build.MODEL}",
+            includeDevice = CrashPrivacy.includeDeviceDetails(ctx),
+            extras = emptyMap(),
+            memory = if (CrashPrivacy.includeDeviceDetails(ctx)) memoryFields(ctx) else emptyMap(),
+            thread = thread.name,
+            type = err.javaClass.name,
+            stack = trace
+        )
         enqueue(ctx, report)
     }
 
@@ -81,21 +85,18 @@ object CrashReporter {
                 if (previous != null && now - previous < THROTTLE_MS) return
                 lastReported["$kind|$key"] = now
             }
-            val report = JSONObject()
-                .put("ts", now)
-                .put("kind", kind)
-                .put("detail", scrub(detail))
-                .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
-                .put("android", Build.VERSION.RELEASE)
-                .put("ver", appVersion(ctx))
-            // Low memory and aggressive OEM power management are the two things that make a fix work
-            // on one phone and fail on another, so carry enough to tell those cases apart in the data.
-            memoryFields(ctx).forEach { (k, v) -> report.put(k, v) }
-            // Scrub string extras too. Callers pass harmless values today, but nothing stops a
-            // future one passing an account label, and this is an upload path.
-            extras.forEach { (k, v) ->
-                report.put(k, if (v is String) scrub(v) else (v ?: JSONObject.NULL))
-            }
+            val includeDevice = CrashPrivacy.includeDeviceDetails(ctx)
+            val report = buildFailureReport(
+                kind = kind,
+                detail = detail,
+                version = appVersion(ctx),
+                androidRelease = Build.VERSION.RELEASE,
+                device = "${Build.MANUFACTURER} ${Build.MODEL}",
+                includeDevice = includeDevice,
+                extras = extras,
+                memory = if (includeDevice) memoryFields(ctx) else emptyMap(),
+                now = now
+            )
             enqueue(ctx.applicationContext, report)
         }
     }
@@ -111,6 +112,45 @@ object CrashReporter {
             "lowMem" to info.lowMemory
         )
     }.getOrDefault(emptyMap())
+
+    /**
+     * Device model, Blackbox user id, and package name are omitted unless [includeDevice] is set.
+     * The throttle key is never part of this object.
+     */
+    internal fun buildFailureReport(
+        kind: String,
+        detail: String,
+        version: String,
+        androidRelease: String,
+        device: String,
+        includeDevice: Boolean,
+        extras: Map<String, Any?>,
+        memory: Map<String, Any> = emptyMap(),
+        now: Long = System.currentTimeMillis(),
+        thread: String? = null,
+        type: String? = null,
+        stack: String? = null
+    ): JSONObject {
+        val report = JSONObject()
+            .put("ts", now)
+            .put("kind", kind)
+            .put("detail", scrub(detail))
+            .put("android", androidRelease)
+            .put("ver", version)
+        if (thread != null) report.put("thread", thread)
+        if (type != null) report.put("type", type)
+        if (stack != null) report.put("stack", scrub(stack))
+        if (includeDevice) {
+            report.put("device", device)
+            memory.forEach { (k, v) -> report.put(k, v) }
+        }
+        val hidden = setOf("userId", "pkg", "package", "device")
+        extras.forEach { (k, v) ->
+            if (!includeDevice && k in hidden) return@forEach
+            report.put(k, if (v is String) scrub(v) else (v ?: JSONObject.NULL))
+        }
+        return report
+    }
 
     /** Redact everything that could identify an account or expose a proxy. Public for unit checks. */
     fun scrub(input: String): String {

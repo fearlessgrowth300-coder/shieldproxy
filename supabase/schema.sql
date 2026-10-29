@@ -24,20 +24,30 @@ create table if not exists public.app_backups (
 );
 
 alter table public.app_backups enable row level security;
+alter table public.app_backups force row level security;
 
--- Each user may read/insert/update/delete ONLY their own rows.
+revoke all on table public.app_backups from public, anon;
+grant select, insert, update, delete on table public.app_backups to authenticated;
+grant all on table public.app_backups to service_role;
+
+-- Each authenticated user may read/insert/update/delete ONLY their own rows.
+-- anon has no grant. auth.uid() is null for anon, and the role check is explicit.
 drop policy if exists app_backups_select on public.app_backups;
 drop policy if exists app_backups_insert on public.app_backups;
 drop policy if exists app_backups_update on public.app_backups;
 drop policy if exists app_backups_delete on public.app_backups;
 create policy app_backups_select on public.app_backups
-    for select using (auth.uid() = user_id);
+    for select to authenticated
+    using (auth.uid() = user_id);
 create policy app_backups_insert on public.app_backups
-    for insert with check (auth.uid() = user_id);
+    for insert to authenticated
+    with check (auth.uid() = user_id);
 create policy app_backups_update on public.app_backups
-    for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+    for update to authenticated
+    using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy app_backups_delete on public.app_backups
-    for delete using (auth.uid() = user_id);
+    for delete to authenticated
+    using (auth.uid() = user_id);
 
 -- ============================================================================
 -- 2. crash_reports — privacy-safe crash reports (CrashReporter -> Supabase.uploadCrashes)
@@ -54,14 +64,32 @@ create table if not exists public.crash_reports (
 create index if not exists crash_reports_user_idx on public.crash_reports (user_id, created_at desc);
 
 alter table public.crash_reports enable row level security;
+alter table public.crash_reports force row level security;
+
+revoke all on table public.crash_reports from public, anon;
+grant select, insert on table public.crash_reports to authenticated;
+grant all on table public.crash_reports to service_role;
 
 -- Users may INSERT their own reports and SELECT their own; no update/delete from the client.
 drop policy if exists crash_reports_insert on public.crash_reports;
 drop policy if exists crash_reports_select on public.crash_reports;
+drop policy if exists crash_reports_update on public.crash_reports;
+drop policy if exists crash_reports_delete on public.crash_reports;
 create policy crash_reports_insert on public.crash_reports
-    for insert with check (auth.uid() = user_id);
+    for insert to authenticated
+    with check (auth.uid() = user_id);
 create policy crash_reports_select on public.crash_reports
-    for select using (auth.uid() = user_id);
+    for select to authenticated
+    using (auth.uid() = user_id);
+
+-- ============================================================================
+-- 2b. Stop shipping the Drive recovery key inside the access token.
+--     The client copies any legacy value into app_backups and a device-local
+--     seal, then this statement removes it from every user.
+-- ============================================================================
+update auth.users
+set raw_user_meta_data = raw_user_meta_data - 'shieldbox_backup_key_v1'
+where raw_user_meta_data ? 'shieldbox_backup_key_v1';
 
 -- ============================================================================
 -- 3. Auth settings that are NOT SQL — set these in the Dashboard (passwordless OTP):

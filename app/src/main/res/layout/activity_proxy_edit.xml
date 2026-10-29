@@ -39,6 +39,10 @@
         <TextView style="@style/Label" android:text="Type" />
         <Spinner android:id="@+id/pxType" android:layout_width="match_parent" android:layout_height="wrap_content" />
 
+        <CheckBox android:id="@+id/pxTls" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="TLS to the proxy (SOCKS-over-TLS or HTTPS)" />
+
         <Button android:id="@+id/pxTest" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginTop="16dp" android:text="Test proxy" />
 

@@ -9,6 +9,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
+import com.privacyshield.proxy.core.ForegroundStarts
 import com.privacyshield.proxy.core.MihomoCore
 import com.privacyshield.proxy.core.RoutingConfig
 import java.io.File
@@ -21,8 +22,15 @@ import java.io.File
  */
 class ShieldVpnService : VpnService() {
 
-    private var tun: ParcelFileDescriptor? = null
     private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
+
+    override fun onCreate() {
+        super.onCreate()
+        // Cold start of this process is what the foreground-service timer measures.
+        // Nothing else may run first: the emulator images have no KVM, and the
+        // main thread was still inside startTunnel when Android gave up on startup.
+        ForegroundStarts.start(this, NOTIF_ID, startingNotification(), ForegroundStarts.SPECIAL_USE)
+    }
 
     companion object {
         const val ACTION_START = "com.privacyshield.proxy.START"
@@ -30,6 +38,15 @@ class ShieldVpnService : VpnService() {
         private const val CHANNEL_ID = "shieldproxy_vpn"
         private const val NOTIF_ID = 1
         private const val WATCHDOG_MS = 20_000L
+
+        // One worker for the whole :vpn process. A new service instance used to
+        // start a second thread; its stop then ran beside the new start and left
+        // the new tun fd open, so tun0 stayed up.
+        private val engineThread = android.os.HandlerThread("shield-vpn").apply {
+            isDaemon = true
+            start()
+        }
+        private val engine = android.os.Handler(engineThread.looper)
 
         @Volatile
         var running: Boolean = false
@@ -61,17 +78,24 @@ class ShieldVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            wantRunning = false
-            stopTunnel()
-            return START_NOT_STICKY
+        // startForegroundService() crashes if this returns before startForeground(),
+        // and loading Mihomo can take longer than that window on a cold emulator.
+        ForegroundStarts.start(this, NOTIF_ID, startingNotification(), ForegroundStarts.SPECIAL_USE)
+        val action = intent?.action
+        if (action == ACTION_STOP) wantRunning = false else wantRunning = true
+        engine.post {
+            // A newer start may already have set wantRunning. Do not tear the
+            // tunnel down, and do not let onDestroy quit the thread under it.
+            if (!wantRunning) {
+                stopTunnel()
+                return@post
+            }
+            // ACTION_START, or a START_STICKY restart after the process was killed
+            // (intent == null) — in that case revive from the persisted active profile.
+            startTunnel()
+            scheduleWatchdog()
         }
-        // ACTION_START, or a START_STICKY restart after the process was killed
-        // (intent == null) — in that case revive from the persisted active profile.
-        wantRunning = true
-        startTunnel()
-        scheduleWatchdog()
-        return START_STICKY
+        return if (action == ACTION_STOP) START_NOT_STICKY else START_STICKY
     }
 
     /** Periodically ensure the engine is actually alive; revive it if it died
@@ -83,28 +107,44 @@ class ShieldVpnService : VpnService() {
                 if (!wantRunning) return
                 if (!MihomoCore.running) {
                     // engine died on its own — rebuild the tunnel + restart Mihomo
-                    stopEngineOnly()
-                    startTunnel()
+                    engine.post {
+                        if (!wantRunning) return@post
+                        stopEngineOnly()
+                        startTunnel()
+                    }
                 }
                 watchdog.postDelayed(this, WATCHDOG_MS)
             }
         }, WATCHDOG_MS)
     }
 
+    private fun markEngineReady(token: String?) {
+        val marker = File(filesDir, "engine_ready.txt")
+        if (token == null) marker.delete() else marker.writeText(token)
+    }
+
     private fun startTunnel() {
+        // Drop any stale marker before the new tun exists, so a waiter cannot
+        // treat the previous session as ready.
+        markEngineReady(null)
         // Switching lists: if already running, tear the engine down first and
         // re-establish with the newly-activated profile's config.
         if (running) stopEngineOnly()
         val cfg = try {
-            RoutingConfig.load(this)
+            val active = RoutingConfig.load(this)
+            val saved = runCatching { com.privacyshield.proxy.core.ProfileStore.load(this) }
+                .getOrDefault(emptyList())
+            com.privacyshield.proxy.core.EngineRoutes.merge(active, saved.map { it.config })
         } catch (e: Exception) {
             lastError = "Protected routing data could not be unlocked"
             stopSelf()
             return
         }
 
+        val androidUser = com.privacyshield.proxy.core.AndroidProfile.current(this)
         val builder = Builder()
-            .setSession("ShieldProxy")
+            .setSession(com.privacyshield.proxy.core.AndroidProfile.vpnSessionName(
+                androidUser.userId, androidUser.managed))
             .setMtu(9000)
             .addAddress("172.19.0.1", 30)
             .addRoute("0.0.0.0", 0)
@@ -119,22 +159,22 @@ class ShieldVpnService : VpnService() {
             builder.setBlocking(false)
         }
 
-        // Whole-device capture; never route our own traffic back in.
+        // addDisallowedApplication is resolved in this Android user only. The other
+        // profile's copy of a package has a different UID and is not affected.
         try {
             builder.addDisallowedApplication(packageName)
         } catch (_: Exception) {
         }
 
-        // CRITICAL: exclude the BlackBox container variants. Their clones route through their OWN
-        // per-clone proxy (the container's native connect() redirect). If this VPN also captured
-        // the container's traffic, it would hijack the clones' proxy connections (DNS -> fake-ip)
-        // and break them (ConnectException). Excluding them lets the whole-phone VPN and per-clone
-        // proxies run at the same time without conflict.
-        for (container in listOf(
-            "top.niunaijun.blackbox", "com.novspace.box",
-            "app.cloudvault.multi", "io.prismhub.clone"
-        )) {
-            try { builder.addDisallowedApplication(container) } catch (_: Exception) {}
+        // Clone routes are enforced inside this tunnel. The hook dials 127.0.0.1:<port>, which
+        // never enters the TUN. Everything else from the container UID is captured and rejected
+        // by the UID rule, so a missed socket cannot use the phone network.
+        // When no clone route is configured, leave the containers excluded so Blackbox's own
+        // UI traffic is not rewritten by fake-ip.
+        if (cfg.bbMap.isEmpty()) {
+            for (container in com.privacyshield.proxy.core.CloneListeners.CONTAINER_PACKAGES) {
+                try { builder.addDisallowedApplication(container) } catch (_: Exception) {}
+            }
         }
 
         val pfd = try {
@@ -145,7 +185,9 @@ class ShieldVpnService : VpnService() {
         if (pfd == null) {
             stopSelf(); return
         }
-        tun = pfd
+        // One owner. Mihomo closes this fd on stop, which is what removes tun0.
+        // A Java dup kept the interface up whenever the native start did not adopt it.
+        val tunFd = pfd.detachFd()
 
         // Mihomo home dir holds config.yaml + downloaded geo/provider files.
         val home = File(filesDir, "mihomo").apply { mkdirs() }
@@ -156,7 +198,8 @@ class ShieldVpnService : VpnService() {
         val pm = packageManager
         val uidResolver: (String) -> Int? = { pkg ->
             try {
-                pm.getPackageUid(pkg, 0)
+                val uid = pm.getPackageUid(pkg, com.privacyshield.proxy.core.PackageQuery.FLAGS)
+                if (com.privacyshield.proxy.core.PackageQuery.sameUser(uid, androidUser.userId)) uid else null
             } catch (_: Exception) {
                 null
             }
@@ -176,9 +219,9 @@ class ShieldVpnService : VpnService() {
                 }
             }
         }
-        configFile.writeText(cfg.toClashYaml(pfd.fd, uidResolver, serverResolver))
+        configFile.writeText(cfg.toClashYaml(tunFd, uidResolver, serverResolver))
 
-        startForeground(NOTIF_ID, buildNotification(cfg))
+        ForegroundStarts.start(this, NOTIF_ID, buildNotification(cfg), ForegroundStarts.SPECIAL_USE)
 
         // Protect Mihomo's outbound sockets so proxy connections exit the real
         // network instead of looping back into our own tun.
@@ -216,10 +259,14 @@ class ShieldVpnService : VpnService() {
         runCatching { configFile.delete() }
         if (err.isNotEmpty()) {
             lastError = err
+            runCatching { ParcelFileDescriptor.adoptFd(tunFd).close() }
             stopTunnel()
             return
         }
         running = true
+        val readyPort = cfg.nodes.firstOrNull { it.name == "emu" }?.port
+            ?: cfg.nodes.firstOrNull { it.isValid() }?.port
+        markEngineReady(readyPort?.toString() ?: "up")
     }
 
     /** Stop the engine + close the tun, but keep the service/foreground alive
@@ -229,11 +276,7 @@ class ShieldVpnService : VpnService() {
             MihomoCore.stop()
             running = false
         }
-        try {
-            tun?.close()
-        } catch (_: Exception) {
-        }
-        tun = null
+        markEngineReady(null)
     }
 
     private fun stopTunnel() {
@@ -246,16 +289,31 @@ class ShieldVpnService : VpnService() {
     override fun onDestroy() {
         // If the system is killing us but the user still wants routing, DON'T flip
         // wantRunning — START_STICKY will restart us and the watchdog revives the engine.
+        // The worker thread is process-wide and daemon; quitting it here dropped
+        // a queued restart and left tun0 up.
         watchdog.removeCallbacksAndMessages(null)
-        stopEngineOnly()
         super.onDestroy()
     }
 
     override fun onRevoke() {
         // User revoked VPN consent (or another VPN took over) — stop for real.
         wantRunning = false
-        stopTunnel()
+        engine.post { stopTunnel() }
         super.onRevoke()
+    }
+
+    private fun startingNotification(): Notification {
+        val nm = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "ShieldProxy", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Starting route")
+            .setSmallIcon(R.drawable.ic_shield)
+            .setOngoing(true)
+            .build()
     }
 
     private fun buildNotification(cfg: RoutingConfig): Notification {
