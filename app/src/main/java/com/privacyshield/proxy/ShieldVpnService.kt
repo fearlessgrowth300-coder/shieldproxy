@@ -23,9 +23,6 @@ import java.io.File
 class ShieldVpnService : VpnService() {
 
     private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
-    private var engineThread: android.os.HandlerThread? = null
-    private var engine: android.os.Handler? = null
-    private var tun: ParcelFileDescriptor? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -33,10 +30,6 @@ class ShieldVpnService : VpnService() {
         // Nothing else may run first: the emulator images have no KVM, and the
         // main thread was still inside startTunnel when Android gave up on startup.
         ForegroundStarts.start(this, NOTIF_ID, startingNotification(), ForegroundStarts.SPECIAL_USE)
-        val thread = android.os.HandlerThread("shield-vpn")
-        thread.start()
-        engineThread = thread
-        engine = android.os.Handler(thread.looper)
     }
 
     companion object {
@@ -45,6 +38,15 @@ class ShieldVpnService : VpnService() {
         private const val CHANNEL_ID = "shieldproxy_vpn"
         private const val NOTIF_ID = 1
         private const val WATCHDOG_MS = 20_000L
+
+        // One worker for the whole :vpn process. A new service instance used to
+        // start a second thread; its stop then ran beside the new start and left
+        // the new tun fd open, so tun0 stayed up.
+        private val engineThread = android.os.HandlerThread("shield-vpn").apply {
+            isDaemon = true
+            start()
+        }
+        private val engine = android.os.Handler(engineThread.looper)
 
         @Volatile
         var running: Boolean = false
@@ -81,12 +83,7 @@ class ShieldVpnService : VpnService() {
         ForegroundStarts.start(this, NOTIF_ID, startingNotification(), ForegroundStarts.SPECIAL_USE)
         val action = intent?.action
         if (action == ACTION_STOP) wantRunning = false else wantRunning = true
-        val handler = engine
-        if (handler == null) {
-            stopSelf()
-            return START_NOT_STICKY
-        }
-        handler.post {
+        engine.post {
             // A newer start may already have set wantRunning. Do not tear the
             // tunnel down, and do not let onDestroy quit the thread under it.
             if (!wantRunning) {
@@ -110,7 +107,7 @@ class ShieldVpnService : VpnService() {
                 if (!wantRunning) return
                 if (!MihomoCore.running) {
                     // engine died on its own — rebuild the tunnel + restart Mihomo
-                    engine?.post {
+                    engine.post {
                         if (!wantRunning) return@post
                         stopEngineOnly()
                         startTunnel()
@@ -188,12 +185,9 @@ class ShieldVpnService : VpnService() {
         if (pfd == null) {
             stopSelf(); return
         }
-        // Mihomo closes the fd it is given. A second owner stays here so stop
-        // can drop tun0 without closing Mihomo's fd (API 30+ fdsan aborts on
-        // a double-close of the same descriptor).
-        tun?.close()
-        tun = pfd
-        val tunFd = pfd.dup().detachFd()
+        // One owner. Mihomo closes this fd on stop, which is what removes tun0.
+        // A Java dup kept the interface up whenever the native start did not adopt it.
+        val tunFd = pfd.detachFd()
 
         // Mihomo home dir holds config.yaml + downloaded geo/provider files.
         val home = File(filesDir, "mihomo").apply { mkdirs() }
@@ -265,6 +259,7 @@ class ShieldVpnService : VpnService() {
         runCatching { configFile.delete() }
         if (err.isNotEmpty()) {
             lastError = err
+            runCatching { ParcelFileDescriptor.adoptFd(tunFd).close() }
             stopTunnel()
             return
         }
@@ -277,14 +272,6 @@ class ShieldVpnService : VpnService() {
     /** Stop the engine + close the tun, but keep the service/foreground alive
      *  (used when switching to another profile). */
     private fun stopEngineOnly() {
-        // Close our fd before Mihomo.stop(). Stop waits for the last tun owner,
-        // and holding this dup across that call left tun0 up for the whole wait.
-        val owned = tun
-        tun = null
-        try {
-            owned?.close()
-        } catch (_: Exception) {
-        }
         if (running || MihomoCore.running) {
             MihomoCore.stop()
             running = false
@@ -302,25 +289,16 @@ class ShieldVpnService : VpnService() {
     override fun onDestroy() {
         // If the system is killing us but the user still wants routing, DON'T flip
         // wantRunning — START_STICKY will restart us and the watchdog revives the engine.
-        // Quitting the engine thread here raced a restart: the next stop was posted
-        // to a dead thread and tun0 stayed up.
+        // The worker thread is process-wide and daemon; quitting it here dropped
+        // a queued restart and left tun0 up.
         watchdog.removeCallbacksAndMessages(null)
-        if (!wantRunning) {
-            val thread = engineThread
-            engine?.post {
-                if (!wantRunning) {
-                    stopEngineOnly()
-                    thread?.quit()
-                }
-            }
-        }
         super.onDestroy()
     }
 
     override fun onRevoke() {
         // User revoked VPN consent (or another VPN took over) — stop for real.
         wantRunning = false
-        engine?.post { stopTunnel() }
+        engine.post { stopTunnel() }
         super.onRevoke()
     }
 
