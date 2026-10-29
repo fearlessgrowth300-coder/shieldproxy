@@ -16,6 +16,7 @@ import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.privacyshield.proxy.core.BlackBoxBridge
 import com.privacyshield.proxy.core.CrashReporter
+import com.privacyshield.proxy.core.ForegroundStarts
 import com.privacyshield.proxy.core.ProfileStore
 import com.privacyshield.proxy.core.ProxyNode
 import com.privacyshield.proxy.core.ProxyTester
@@ -82,7 +83,7 @@ class ProxyGuardService : Service() {
         ui = Handler(mainLooper)
         checks = Executors.newFixedThreadPool(4)
         restoreArmedState()
-        startForeground(FG_ID, buildNotification())
+        ForegroundStarts.start(this, FG_ID, buildNotification(), ForegroundStarts.SPECIAL_USE)
         ui.post(ticker)
         scheduleHeartbeat()
     }

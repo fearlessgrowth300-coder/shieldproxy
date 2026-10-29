@@ -1,5 +1,6 @@
 package com.privacyshield.proxy
 
+import android.content.pm.ApplicationInfo
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
@@ -104,6 +105,10 @@ class LeakTestActivity : AppCompatActivity() {
             isFillViewport = true
             addView(root)
         })
+        if (intent.getBooleanExtra("autoRun", false) &&
+            (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            runTests()
+        }
     }
 
     private fun runTests() {

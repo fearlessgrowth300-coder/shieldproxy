@@ -9,6 +9,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
+import com.privacyshield.proxy.core.ForegroundStarts
 import com.privacyshield.proxy.core.MihomoCore
 import com.privacyshield.proxy.core.RoutingConfig
 import java.io.File
@@ -61,6 +62,9 @@ class ShieldVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // startForegroundService() crashes if this returns before startForeground(),
+        // and loading Mihomo can take longer than that window on a cold emulator.
+        ForegroundStarts.start(this, NOTIF_ID, startingNotification(), ForegroundStarts.SPECIAL_USE)
         if (intent?.action == ACTION_STOP) {
             wantRunning = false
             stopTunnel()
@@ -184,7 +188,7 @@ class ShieldVpnService : VpnService() {
         }
         configFile.writeText(cfg.toClashYaml(pfd.fd, uidResolver, serverResolver))
 
-        startForeground(NOTIF_ID, buildNotification(cfg))
+        ForegroundStarts.start(this, NOTIF_ID, buildNotification(cfg), ForegroundStarts.SPECIAL_USE)
 
         // Protect Mihomo's outbound sockets so proxy connections exit the real
         // network instead of looping back into our own tun.
@@ -262,6 +266,20 @@ class ShieldVpnService : VpnService() {
         wantRunning = false
         stopTunnel()
         super.onRevoke()
+    }
+
+    private fun startingNotification(): Notification {
+        val nm = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "ShieldProxy", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Starting route")
+            .setSmallIcon(R.drawable.ic_shield)
+            .setOngoing(true)
+            .build()
     }
 
     private fun buildNotification(cfg: RoutingConfig): Notification {
