@@ -87,7 +87,9 @@ class ShieldVpnService : VpnService() {
             return START_NOT_STICKY
         }
         handler.post {
-            if (action == ACTION_STOP) {
+            // A newer start may already have set wantRunning. Do not tear the
+            // tunnel down, and do not let onDestroy quit the thread under it.
+            if (!wantRunning) {
                 stopTunnel()
                 return@post
             }
@@ -275,15 +277,18 @@ class ShieldVpnService : VpnService() {
     /** Stop the engine + close the tun, but keep the service/foreground alive
      *  (used when switching to another profile). */
     private fun stopEngineOnly() {
+        // Close our fd before Mihomo.stop(). Stop waits for the last tun owner,
+        // and holding this dup across that call left tun0 up for the whole wait.
+        val owned = tun
+        tun = null
+        try {
+            owned?.close()
+        } catch (_: Exception) {
+        }
         if (running || MihomoCore.running) {
             MihomoCore.stop()
             running = false
         }
-        try {
-            tun?.close()
-        } catch (_: Exception) {
-        }
-        tun = null
         markEngineReady(null)
     }
 
@@ -297,9 +302,18 @@ class ShieldVpnService : VpnService() {
     override fun onDestroy() {
         // If the system is killing us but the user still wants routing, DON'T flip
         // wantRunning — START_STICKY will restart us and the watchdog revives the engine.
+        // Quitting the engine thread here raced a restart: the next stop was posted
+        // to a dead thread and tun0 stayed up.
         watchdog.removeCallbacksAndMessages(null)
-        engine?.post { stopEngineOnly() }
-        engineThread?.quitSafely()
+        if (!wantRunning) {
+            val thread = engineThread
+            engine?.post {
+                if (!wantRunning) {
+                    stopEngineOnly()
+                    thread?.quit()
+                }
+            }
+        }
         super.onDestroy()
     }
 
