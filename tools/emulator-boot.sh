@@ -17,11 +17,23 @@ mkdir -p "$ANDROID_AVD_HOME"
 AVD=shield_api_$API
 LOG=$ROOT/emulator-boot.log
 
-yes | sdkmanager --sdk_root="$SDK" --install \
-  "emulator" \
-  "platforms;android-$API" \
-  "system-images;android-$API;google_apis;x86_64" >/tmp/sdkmanager.log || true
-if [ ! -d "$SDK/system-images/android-$API/google_apis/x86_64" ]; then
+ok=0
+try=1
+while [ "$try" -le 3 ]; do
+  yes | sdkmanager --sdk_root="$SDK" --install \
+    "emulator" \
+    "platforms;android-$API" \
+    "system-images;android-$API;google_apis;x86_64" >/tmp/sdkmanager.log || true
+  if [ -d "$SDK/system-images/android-$API/google_apis/x86_64" ] && [ -x "$SDK/emulator/emulator" ]; then
+    ok=1
+    break
+  fi
+  echo "sdkmanager attempt $try failed" >&2
+  tail -5 /tmp/sdkmanager.log >&2 || true
+  try=$((try + 1))
+  sleep 5
+done
+if [ "$ok" != "1" ]; then
   echo "system image for API $API was not installed" >&2
   tail -20 /tmp/sdkmanager.log >&2 || true
   exit 1

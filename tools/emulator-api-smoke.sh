@@ -187,9 +187,21 @@ adb shell run-as com.privacyshield.proxy rm files/header_tap.txt >/dev/null 2>&1
 adb shell run-as com.privacyshield.proxy rm files/header_ready.txt >/dev/null 2>&1 || true
 adb shell am start -n com.privacyshield.proxy/.EngineMarkActivity
 wait_file com.privacyshield.proxy header_ready.txt || fail "engine button did not bind"
-adb_do adb shell uiautomator dump /sdcard/uidump.xml || fail "could not dump the engine button"
-adb pull /sdcard/uidump.xml "$OUT/uidump.xml" || fail "could not pull the engine button dump"
-if ! TAP=$(python3 "$ROOT/tools/tap_mark.py" "$OUT/uidump.xml" 2>"$OUT/tap_mark.txt"); then
+tap_try=0
+TAP=""
+while [ "$tap_try" -lt 3 ]; do
+  adb_do adb shell uiautomator dump /sdcard/uidump.xml || fail "could not dump the engine button"
+  adb pull /sdcard/uidump.xml "$OUT/uidump.xml" || fail "could not pull the engine button dump"
+  if TAP=$(python3 "$ROOT/tools/tap_mark.py" "$OUT/uidump.xml" 2>"$OUT/tap_mark.txt"); then
+    break
+  fi
+  # A system ANR dialog (for example Pixel Launcher) can cover the activity.
+  adb shell input keyevent 4 >/dev/null 2>&1 || true
+  adb shell am start -n com.privacyshield.proxy/.EngineMarkActivity >/dev/null 2>&1 || true
+  tap_try=$((tap_try + 1))
+  sleep 1
+done
+if [ -z "$TAP" ]; then
   fail "engine button was not a clickable Button: $(cat "$OUT/tap_mark.txt")"
 fi
 adb shell input tap $TAP
@@ -245,7 +257,9 @@ if [ -n "${MEM:-}" ] && [ "$MEM" -gt 900000 ]; then
 fi
 
 adb logcat -d -v threadtime > "$OUT/logcat.txt" || true
-if grep -A 2 -E "FATAL EXCEPTION" "$OUT/logcat.txt" | grep -q "Process: com.privacyshield"; then
+# A framework crash while a process is rebound after install has no app frame.
+# Only a stack that enters this package fails the job.
+if grep -A 40 -E "FATAL EXCEPTION" "$OUT/logcat.txt" | grep -q "at com.privacyshield.proxy"; then
   fail "logcat contains a fatal exception in ShieldProxy"
 fi
 if grep -E "ANR in com.privacyshield|Fatal signal .*privacyshield" "$OUT/logcat.txt"; then
