@@ -2,6 +2,19 @@
 
 ShieldProxy cannot see the hook. It lives in the legacy-falcons-blackbox repo. This is the behavior that hook must implement before a clone route is actually forced onto its assigned exit. Until the hook does this, ShieldProxy can only reject container traffic that reaches the VPN, and a hook that still dials the upstream proxy directly will be rejected too.
 
+## One route per Blackbox user
+
+A Blackbox user is one exit. Instagram, Play Store, and Google services in that user are not separate routes. ShieldProxy publishes:
+
+- `scope=user` on `setProxy`, `canSetProxy`, and `assignAndVerifyRoute`.
+- `localPort`, `localHost`, `socksUser`, and `socksPassword` for the user listener `bb:<authority>:<userId>:*`. Every package in the user dials that listener.
+- `packageLocalPort` for the older per-package listener. It pins the same node. New hooks must use `localPort`.
+- The same bundle again for `com.android.vending`, `com.google.android.gms`, and `com.google.android.gsf` (and the other Google packages in that user). A package with no file of its own must not fail with `Assigned proxy is not ready: INVALID_CONFIG` when the user already has a route.
+
+Blackbox applies that user route when a package file is missing, instead of treating the package as unconfigured. Two packages in one user must not be given two nodes. ShieldProxy rejects that conflict.
+
+The privacy scan does not call `prepareRoute` or `verifyRoute`. Those calls were starting a guest per route and leaving the screen on "Scanning…". The scan checks the proxy exit, that exits are not shared and are not the phone IP, that the user listener accepts a connection, and that the tunnel config keeps containers outside the VPN, rejects IPv6, rejects UDP 443, and fails closed. Each route has an 8 second limit. Four routes run at a time.
+
 ## What ShieldProxy publishes
 
 For every saved clone tag `bb:<authority>:<userId>:<package>` the running Mihomo config contains:

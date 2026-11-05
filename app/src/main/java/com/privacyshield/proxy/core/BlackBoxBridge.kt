@@ -180,12 +180,20 @@ object BlackBoxBridge {
             ))
         }
         val r = ctx.contentResolver.call(baseFor(authority), "setProxy", null, extras)
-        BbProxyAssignment(
+        val primary = BbProxyAssignment(
             ok = r?.getBoolean("ok") == true,
             routeId = r?.getString("routeId").orEmpty(),
             state = r?.getString("state").orEmpty(),
             error = r?.getString("err").orEmpty()
         )
+        if (primary.ok && pkg !in UserRoute.SHARED_PACKAGES) {
+            for (shared in UserRoute.SHARED_PACKAGES) {
+                runCatching {
+                    setCloneProxy(ctx, authority, userId, shared, node, geo = geo)
+                }
+            }
+        }
+        primary
     } catch (e: Exception) {
         BbProxyAssignment(false, error = e.message ?: e.javaClass.simpleName)
     }
@@ -324,6 +332,20 @@ object BlackBoxBridge {
             ))
         }
         val r = ctx.contentResolver.call(baseFor(authority), "assignAndVerifyRoute", null, extras)
+        if (pkg !in UserRoute.SHARED_PACKAGES) {
+            val geo = RouteGeo(
+                countryIso = verifiedCountryIso,
+                city = verifiedCity,
+                region = verifiedRegion,
+                latitude = verifiedLatitude,
+                longitude = verifiedLongitude,
+                timezoneId = verifiedTimezoneId,
+                locale = RouteLocale.forCountry(verifiedCountryIso.ifBlank { node.countryIsoHint() })
+            )
+            for (shared in UserRoute.SHARED_PACKAGES) {
+                runCatching { setCloneProxy(ctx, authority, userId, shared, node, geo = geo) }
+            }
+        }
         BbRouteVerification(
             ok = r?.getBoolean("ok") == true,
             routeId = r?.getString("routeId").orEmpty(),
@@ -387,8 +409,8 @@ object BlackBoxBridge {
     internal fun contractFor(
         authority: String, userId: Int, pkg: String, node: ProxyNode, geo: RouteGeo
     ): CloneProxyContract {
-        val tag = CloneListeners.tag(authority, userId, pkg)
         val country = geo.countryIso.ifBlank { node.countryIsoHint() }
+        val user = CloneListeners.userTag(authority, userId)
         return CloneProxyContract(
             tls = node.tls,
             udp = node.udp,
@@ -399,10 +421,10 @@ object BlackBoxBridge {
             longitude = geo.longitude,
             timezoneId = geo.timezoneId,
             locale = geo.locale.ifBlank { RouteLocale.forCountry(country) },
-            localPort = CloneListeners.portFor(authority, userId, pkg),
+            localPort = CloneListeners.portForUser(authority, userId),
             localHost = "127.0.0.1",
-            socksUser = CloneListeners.socksUser(tag),
-            socksPassword = CloneListeners.socksPassword(tag)
+            socksUser = CloneListeners.socksUser(user),
+            socksPassword = CloneListeners.socksPassword(user)
         )
     }
 
@@ -436,6 +458,9 @@ object BlackBoxBridge {
         extras.putString("localHost", contract.localHost)
         extras.putString("socksUser", contract.socksUser)
         extras.putString("socksPassword", contract.socksPassword)
+        // Every package in this Blackbox user, including Play Store and GMS, uses this listener.
+        extras.putString("scope", "user")
+        extras.putInt("packageLocalPort", CloneListeners.portFor(authority, userId, pkg))
     }
 
     /** Is this clone's process currently alive? Lets the guard nag/kill only when in use. */

@@ -51,14 +51,43 @@ object CloneListeners {
 
     fun tag(authority: String, userId: Int, pkg: String) = "bb:$authority:$userId:$pkg"
 
+    /** One listener shared by every package in a Blackbox user, including Play Store and GMS. */
+    fun userTag(authority: String, userId: Int) = "bb:$authority:$userId:*"
+
     fun listenerName(port: Int) = "bbp$port"
 
+    fun stablePort(tag: String): Int = PORT_BASE + (stableHash(tag) % PORT_SPAN)
+
+    fun portForUser(authority: String, userId: Int): Int = stablePort(userTag(authority, userId))
+
+    /** User listeners keep [stablePort]. Package listeners move aside when those ports collide. */
+    fun portsFor(tags: Map<String, String>): Map<String, Int> {
+        val users = tags.keys.filter { it.endsWith(":*") }.sorted()
+        val used = HashSet<Int>()
+        val reserved = LinkedHashMap<String, Int>()
+        for (tag in users) {
+            var port = stablePort(tag)
+            var spins = 0
+            while (!used.add(port)) {
+                port = PORT_BASE + ((port - PORT_BASE + 1) % PORT_SPAN)
+                if (++spins > PORT_SPAN) error("No free clone listener port")
+            }
+            reserved[tag] = port
+        }
+        return assignPorts(tags.keys, reserved)
+    }
+
     /** Stable across process restarts. Adding a new tag does not move an existing port. */
-    fun assignPorts(tags: Collection<String>): Map<String, Int> {
+    fun assignPorts(tags: Collection<String>, reserved: Map<String, Int> = emptyMap()): Map<String, Int> {
         val used = HashSet<Int>()
         val out = LinkedHashMap<String, Int>()
+        for ((tag, port) in reserved) {
+            used.add(port)
+            out[tag] = port
+        }
         for (tag in tags.distinct().sorted()) {
-            var port = PORT_BASE + (stableHash(tag) % PORT_SPAN)
+            if (tag in out) continue
+            var port = stablePort(tag)
             var spins = 0
             while (!used.add(port)) {
                 port = PORT_BASE + ((port - PORT_BASE + 1) % PORT_SPAN)
@@ -83,21 +112,45 @@ object CloneListeners {
         nodeExists: (String) -> Boolean
     ) {
         val rows = bbMap.filter { (_, node) -> nodeExists(node) }
-        if (rows.isEmpty()) return
-        val ports = assignPorts(rows.keys)
+        val users = userListeners(bbMap).filter { (_, node) -> nodeExists(node) }
+        if (rows.isEmpty() && users.isEmpty()) return
+        val ports = portsFor(rows + users)
         sb.append("listeners:\n")
         for ((tag, node) in rows) {
-            val port = ports.getValue(tag)
-            sb.append("  - name: ").append(ProxyNode.quote(listenerName(port))).append("\n")
-            sb.append("    type: socks\n")
-            sb.append("    listen: 127.0.0.1\n")
-            sb.append("    port: ").append(port).append("\n")
-            sb.append("    udp: true\n")
-            sb.append("    proxy: ").append(ProxyNode.quote(node)).append("\n")
-            sb.append("    users:\n")
-            sb.append("      - username: ").append(ProxyNode.quote(socksUser(tag))).append("\n")
-            sb.append("        password: ").append(ProxyNode.quote(socksPassword(tag))).append("\n")
+            writeListener(sb, ports.getValue(tag), tag, node)
         }
+        for ((tag, node) in users) {
+            writeListener(sb, ports.getValue(tag), tag, node)
+        }
+    }
+
+    /**
+     * Packages in one Blackbox user share a node, so they share one listener.
+     * A user whose saved packages name two nodes is omitted; that conflict is a scan failure.
+     */
+    fun userListeners(bbMap: Map<String, String>): Map<String, String> {
+        val nodes = LinkedHashMap<String, MutableSet<String>>()
+        for ((tag, node) in bbMap) {
+            val parsed = AssignmentRules.parse(tag) ?: continue
+            nodes.getOrPut(userTag(parsed.authority, parsed.userId)) { LinkedHashSet() }.add(node)
+        }
+        val out = LinkedHashMap<String, String>()
+        for ((tag, names) in nodes) {
+            if (names.size == 1) out[tag] = names.single()
+        }
+        return out
+    }
+
+    private fun writeListener(sb: StringBuilder, port: Int, tag: String, node: String) {
+        sb.append("  - name: ").append(ProxyNode.quote(listenerName(port))).append("\n")
+        sb.append("    type: socks\n")
+        sb.append("    listen: 127.0.0.1\n")
+        sb.append("    port: ").append(port).append("\n")
+        sb.append("    udp: true\n")
+        sb.append("    proxy: ").append(ProxyNode.quote(node)).append("\n")
+        sb.append("    users:\n")
+        sb.append("      - username: ").append(ProxyNode.quote(socksUser(tag))).append("\n")
+        sb.append("        password: ").append(ProxyNode.quote(socksPassword(tag))).append("\n")
     }
 
     /**
@@ -106,8 +159,13 @@ object CloneListeners {
      */
     fun appendRules(sb: StringBuilder, bbMap: Map<String, String>, uidOf: ((String) -> Int?)?) {
         if (bbMap.isEmpty()) return
-        val ports = assignPorts(bbMap.keys)
+        val users = userListeners(bbMap)
+        val ports = portsFor(bbMap + users)
         for ((tag, node) in bbMap) {
+            val port = ports[tag] ?: continue
+            sb.append("  - IN-NAME,").append(listenerName(port)).append(",").append(node).append("\n")
+        }
+        for ((tag, node) in users) {
             val port = ports[tag] ?: continue
             sb.append("  - IN-NAME,").append(listenerName(port)).append(",").append(node).append("\n")
         }

@@ -84,6 +84,31 @@ class RouteIsolationConfigTest {
     }
 
     @Test
+    fun playStoreUsesTheSameUserListenerAsInstagram() {
+        val cfg = RoutingConfig()
+        cfg.nodes.add(node("Miami"))
+        cfg.bbMap[tag(0, "com.instagram.android")] = "Miami"
+        val yaml = cfg.toClashYaml()
+        val port = CloneListeners.portForUser(authority, 0)
+        assertTrue(yaml.contains("port: $port"))
+        val play = BlackBoxBridge.contractFor(
+            authority, 0, "com.android.vending", node("Miami"), RouteGeo()
+        )
+        assertEquals(port, play.localPort)
+        assertEquals(
+            CloneListeners.socksPassword(CloneListeners.userTag(authority, 0)),
+            play.socksPassword
+        )
+        assertEquals(
+            listOf("top.niunaijun.blackbox.bridge:0"),
+            UserRoute.conflicts(mapOf(
+                tag(0, "com.instagram.android") to "Miami",
+                tag(0, "com.android.vending") to "Paris"
+            ))
+        )
+    }
+
+    @Test
     fun engineStartOrderReachesTheCoreBeforeTheListener() {
         assertEquals(
             listOf(
@@ -133,7 +158,7 @@ class RouteIsolationConfigTest {
         assertEquals(48.8, contract.latitude!!, 0.001)
         assertEquals(2.3, contract.longitude!!, 0.001)
         assertEquals("127.0.0.1", contract.localHost)
-        assertTrue(contract.localPort in 20000..27999)
+        assertEquals(CloneListeners.portForUser(authority, 4), contract.localPort)
         assertEquals("sp", contract.socksUser)
         assertTrue(contract.socksPassword.isNotBlank())
     }

@@ -111,72 +111,169 @@ class LeakTestActivity : AppCompatActivity() {
         }
     }
 
+    private var scanGeneration = 0
+
     private fun runTests() {
         val targets = cloneTargets()
-        runButton.isEnabled = false
+        val generation = ++scanGeneration
+        runButton.text = "Cancel scan"
+        runButton.isEnabled = true
+        runButton.setOnClickListener {
+            scanGeneration++
+            runButton.text = "Run full privacy scan"
+            runButton.setOnClickListener { runTests() }
+            summary.text = "Scan cancelled."
+        }
         results.removeAllViews()
         summary.text = if (targets.isEmpty()) {
             "No clone assignments were found. Assign a BlackBox app to a proxy first."
         } else {
-            "Scanning ${targets.size} clone route${if (targets.size == 1) "" else "s"}…"
+            "0/${targets.size}"
         }
         if (targets.isEmpty()) {
-            runButton.isEnabled = true
+            runButton.text = "Run full privacy scan"
+            runButton.setOnClickListener { runTests() }
             return
         }
-
+        val app = applicationContext
         Thread {
             val realIp = directRealIp()
-            val ipv6Open = ipv6Reachable()
-            val scanned = targets.map { scanClone(it, realIp, ipv6Open) }.toMutableList()
-
-            // A duplicate identity digest across different users is a hard isolation failure.
-            val duplicateIdentities = scanned.filter { it.identityDigest.isNotBlank() }
-                .groupBy { it.identityDigest }
-                .filterValues { group -> group.map { "${it.target.authority}:${it.target.userId}" }.distinct().size > 1 }
-                .keys
-            for (digest in duplicateIdentities) {
-                val users = scanned.filter { it.identityDigest == digest }
-                    .map { "${it.target.authority}:${it.target.userId}" }
-                com.privacyshield.proxy.core.CloneIdentityBook.block(this, users)
+            val cfg = runCatching { com.privacyshield.proxy.core.RoutingConfig.load(app) }.getOrNull()
+            val ipv6Blocked = cfg?.let { !it.ipv6 && it.blockIpv6WhenOff } ?: true
+            val stunBlocked = cfg?.blockQuic ?: true
+            val containersExcluded = com.privacyshield.proxy.core.CloneListeners
+                .packagesExcludedFromVpn().isNotEmpty()
+            val privateDnsDirect = containersExcluded
+            val killSwitchOn = com.privacyshield.proxy.core.KillSwitchStore.isEnabled(app)
+            val conflicts = com.privacyshield.proxy.core.UserRoute.conflicts(
+                targets.associate { com.privacyshield.proxy.core.CloneListeners.tag(it.authority, it.userId, it.pkg) to it.node.name }
+            )
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(4)
+            val done = java.util.concurrent.atomic.AtomicInteger()
+            val jobs = targets.map { target ->
+                pool.submit<CloneResult> {
+                    val result = scanClone(
+                        target, realIp, ipv6Blocked, stunBlocked, containersExcluded,
+                        privateDnsDirect, killSwitchOn, targetKey(target) in conflicts, generation
+                    )
+                    val n = done.incrementAndGet()
+                    if (generation == scanGeneration) {
+                        runOnUiThread {
+                            if (generation != scanGeneration) return@runOnUiThread
+                            summary.text = "$n/${targets.size}  ${target.label} · user ${target.userId}"
+                        }
+                    }
+                    result
+                }
             }
+            val scanned = ArrayList<CloneResult>()
+            for (job in jobs) {
+                val result = try {
+                    job.get(12, java.util.concurrent.TimeUnit.SECONDS)
+                } catch (_: Exception) {
+                    null
+                }
+                if (generation != scanGeneration) {
+                    pool.shutdownNow()
+                    return@Thread
+                }
+                scanned.add(result ?: CloneResult(
+                    targets[scanned.size], 2, "TIMEOUT", "The route check did not finish within 8 seconds."
+                ))
+            }
+            pool.shutdownNow()
+            val exits = scanned.mapIndexedNotNull { index, result ->
+                if (result.exitIp.isBlank()) null else index.toString() to result.exitIp
+            }.toMap()
+            val shared = com.privacyshield.proxy.core.RouteLeakCheck.sharedExits(exits)
             for (i in scanned.indices) {
-                val r = scanned[i]
-                if (r.identityDigest in duplicateIdentities) {
+                val ip = scanned[i].exitIp
+                if (ip.isNotBlank() && ip.lowercase() in shared) {
+                    val r = scanned[i]
                     scanned[i] = r.copy(
                         level = 2,
-                        headline = "Identity collision detected",
-                        detail = com.privacyshield.proxy.core.ScanReport.identityLine(true) + "\n" + r.detail
+                        headline = "FAIL",
+                        detail = "FAIL exit $ip is shared with another route\n" + r.detail
                     )
                 }
             }
-
             val failures = scanned.count { it.level == 2 }
             val warnings = scanned.count { it.level == 1 }
-            val overlap = com.privacyshield.proxy.core.ProfileStatus.warningsFor(
-                this,
-                scanned.filter { it.exitIp.isNotBlank() }.map {
-                    com.privacyshield.proxy.core.ExitOverlap.Mark(
-                        com.privacyshield.proxy.core.AndroidProfile.current(this).userId,
-                        it.exitIp,
-                        com.privacyshield.proxy.core.ExitOverlap.proxyKey(
-                            it.target.node.server, it.target.node.port, it.target.node.username
-                        )
-                    )
-                }
-            )
             runOnUiThread {
-                addProfileCard(overlap)
-                addNetworkCard(realIp, ipv6Open)
+                if (generation != scanGeneration) return@runOnUiThread
+                addNetworkCard(realIp, !ipv6Blocked)
                 scanned.forEach { addCloneCard(it) }
                 summary.text = when {
-                    failures > 0 -> "$failures clone${if (failures == 1) "" else "s"} failed isolation. Do not use the affected clone until corrected."
-                    warnings > 0 -> "Identity separation passed. $warnings route${if (warnings == 1) " needs" else "s need"} attention."
-                    else -> "All ${scanned.size} clones have distinct identities and verified proxy routes."
+                    failures > 0 -> "$failures of ${scanned.size} routes failed."
+                    warnings > 0 -> "No cross-route exit was shared. $warnings route${if (warnings == 1) " needs" else "s need"} attention."
+                    else -> "All ${scanned.size} routes finished. Exits differ and none is the phone IP."
                 }
-                runButton.isEnabled = true
+                runButton.text = "Run full privacy scan"
+                runButton.setOnClickListener { runTests() }
             }
         }.apply { name = "ClonePrivacyScan" }.start()
+    }
+
+    private fun targetKey(t: CloneTarget) = "${t.authority}:${t.userId}"
+
+    private fun scanClone(
+        t: CloneTarget,
+        realIp: String?,
+        ipv6Blocked: Boolean,
+        stunBlocked: Boolean,
+        containersExcluded: Boolean,
+        privateDnsDirect: Boolean,
+        killSwitchOn: Boolean,
+        userConflict: Boolean,
+        generation: Int
+    ): CloneResult {
+        val started = android.os.SystemClock.elapsedRealtime()
+        fun expired() = android.os.SystemClock.elapsedRealtime() - started >= 8_000
+        if (generation != scanGeneration) {
+            return CloneResult(t, 2, "TIMEOUT", "Cancelled.")
+        }
+        if (expired()) return CloneResult(t, 2, "TIMEOUT", "The route check did not finish within 8 seconds.")
+        val proxy = com.privacyshield.proxy.core.ProxyTester.test(
+            t.node, lookupMetadata = false, timeoutMs = 3_500
+        )
+        if (expired()) return CloneResult(t, 2, "TIMEOUT", "The proxy check exceeded 8 seconds.", exitIp = proxy.ip)
+        val listenerOpen = listenerOpen(t)
+        val verdict = com.privacyshield.proxy.core.RouteLeakCheck.assess(
+            exitIp = proxy.ip,
+            realIp = realIp,
+            listenerOpen = listenerOpen,
+            userConflict = userConflict,
+            containersExcluded = containersExcluded,
+            privateDnsDirect = privateDnsDirect,
+            ipv6Blocked = ipv6Blocked,
+            stunBlocked = stunBlocked,
+            killSwitchOn = killSwitchOn
+        )
+        val port = com.privacyshield.proxy.core.CloneListeners.portForUser(t.authority, t.userId)
+        val detail = buildString {
+            append("Play Store and Google services in user ${t.userId} use 127.0.0.1:$port, the same route as ${t.label}.")
+            append("\n")
+            append(verdict.lines.joinToString("\n"))
+            if (!proxy.ok && proxy.error.isNotBlank()) append("\n").append(proxy.error)
+        }
+        val headline = when {
+            expired() -> "TIMEOUT"
+            verdict.pass -> "PASS"
+            else -> "FAIL"
+        }
+        return CloneResult(
+            t, if (verdict.pass) 0 else 2, headline, detail, exitIp = proxy.ip
+        )
+    }
+
+    private fun listenerOpen(t: CloneTarget): Boolean {
+        val port = com.privacyshield.proxy.core.CloneListeners.portForUser(t.authority, t.userId)
+        return runCatching {
+            java.net.Socket().use {
+                it.connect(java.net.InetSocketAddress("127.0.0.1", port), 400)
+                true
+            }
+        }.getOrDefault(false)
     }
 
     private fun cloneTargets(): List<CloneTarget> {
@@ -196,67 +293,9 @@ class LeakTestActivity : AppCompatActivity() {
                 )
             }
         }
-        return out.values.toList()
-    }
-
-    private fun scanClone(t: CloneTarget, realIp: String?, ipv6Open: Boolean): CloneResult {
-        val identity = BlackBoxBridge.identityStatus(this, t.authority, t.userId)
-        if (!identity.ok || identity.digest.isBlank()) {
-            return CloneResult(t, 2, "Identity isolation incomplete",
-                identity.error.ifBlank { "BlackBox did not provide a complete protected identity." })
+        return out.values.groupBy { "${it.authority}:${it.userId}" }.values.map { group ->
+            group.first()
         }
-
-        val proxy = ProxyTester.test(t.node, lookupMetadata = true)
-        if (!proxy.ok || proxy.ip.isBlank()) {
-            return CloneResult(t, 2, "Proxy unavailable — clone remains closed",
-                proxy.error.ifBlank { "The assigned proxy exit could not be verified." }, identity.digest)
-        }
-        if (proxy.ip == realIp) {
-            return CloneResult(t, 2, "Proxy exit equals the phone network",
-                "No usable route separation was detected.", identity.digest)
-        }
-        com.privacyshield.proxy.core.ProfileStatus.note(
-            this, proxy.ip, t.node.server, t.node.port, t.node.username
-        )
-
-        var route = BlackBoxBridge.verifyRoute(this, t.authority, t.userId, t.pkg, proxy.ip)
-        if (!route.ok && route.state == "NOT_RUNNING") {
-            val prepared = BlackBoxBridge.prepareRoute(this, t.authority, t.userId, t.pkg)
-            if (prepared.ok) route = BlackBoxBridge.verifyRoute(this, t.authority, t.userId, t.pkg, proxy.ip)
-        }
-        if (!route.ok) {
-            return CloneResult(t, 2, "Inside-clone route not verified",
-                "The proxy itself works, but the clone process did not prove the same exit. ${route.error}".trim(),
-                identity.digest, route.routeId)
-        }
-        val exitMatched = route.exitIp.isNotBlank() && route.exitIp.equals(proxy.ip, ignoreCase = true)
-        if (!exitMatched) {
-            return CloneResult(t, 2, "In-guest exit did not match the proxy",
-                com.privacyshield.proxy.core.ScanReport.routeLine(false, route.exitIp.ifBlank { proxy.ip }),
-                identity.digest, route.routeId)
-        }
-
-        val guardsMissing = !route.kernelGuard || !route.sensorGuard
-        val warning = guardsMissing || (ipv6Open && !t.node.carriesUdp())
-        val detail = buildString {
-            append(com.privacyshield.proxy.core.ScanReport.routeLine(true, route.exitIp))
-            append("\n")
-            append(com.privacyshield.proxy.core.ScanReport.kernelLine(route.kernelGuard))
-            append("\n")
-            append(com.privacyshield.proxy.core.ScanReport.sensorLine(route.sensorGuard))
-            if (ipv6Open && !t.node.carriesUdp()) {
-                append("\nThis phone has IPv6. Clone IPv6 is rejected only while the VPN is up and the container UID rule is loaded.")
-            }
-        }
-        return CloneResult(
-            t,
-            if (warning) 1 else 0,
-            if (guardsMissing) "Route verified, device guards incomplete" else "Identity and route verified",
-            detail,
-            identity.digest,
-            route.routeId,
-            route.exitIp.ifBlank { proxy.ip }
-        )
     }
 
     private fun addProfileCard(overlap: List<String>) {
@@ -297,7 +336,10 @@ class LeakTestActivity : AppCompatActivity() {
             1 -> Color.parseColor("#F7C873")
             else -> Color.parseColor("#4EE0B5")
         }
-        val badge = when (r.level) { 2 -> "FAILED"; 1 -> "CHECK"; else -> "ISOLATED" }
+        val badge = when (r.headline) {
+            "PASS", "FAIL", "TIMEOUT" -> r.headline
+            else -> when (r.level) { 2 -> "FAIL"; 1 -> "CHECK"; else -> "PASS" }
+        }
         val shortRoute = r.routeId.takeIf { it.isNotBlank() }?.take(10)?.let { "\nRoute ID: $it…" }.orEmpty()
         addCard(
             "${r.target.label} · User ${r.target.userId}", badge, color,
@@ -360,8 +402,8 @@ class LeakTestActivity : AppCompatActivity() {
 
     private fun directRealIp(): String? = runCatching {
         val c = (URL("https://api.ipify.org").openConnection() as HttpURLConnection).apply {
-            connectTimeout = 8_000
-            readTimeout = 8_000
+            connectTimeout = 3_000
+            readTimeout = 3_000
         }
         c.inputStream.bufferedReader().use { it.readText().trim() }.takeIf { it.isNotBlank() }
     }.getOrNull()

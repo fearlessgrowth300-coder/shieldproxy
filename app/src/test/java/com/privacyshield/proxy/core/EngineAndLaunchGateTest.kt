@@ -51,4 +51,36 @@ class EngineAndLaunchGateTest {
         )
         assertEquals("Isolation guard failed: sensor", mismatch.block)
     }
+
+    @Test
+    fun distinctExitsPassAndASharedExitFails() {
+        val ok = RouteLeakCheck.assess(
+            exitIp = "203.0.113.10",
+            realIp = "198.51.100.8",
+            listenerOpen = true,
+            userConflict = false,
+            containersExcluded = true,
+            privateDnsDirect = true,
+            ipv6Blocked = true,
+            stunBlocked = true,
+            killSwitchOn = true
+        )
+        assertTrue(ok.pass)
+        assertEquals(
+            setOf("203.0.113.10"),
+            RouteLeakCheck.sharedExits(mapOf("a" to "203.0.113.10", "b" to "203.0.113.10"))
+        )
+        val real = RouteLeakCheck.assess(
+            exitIp = "198.51.100.8",
+            realIp = "198.51.100.8",
+            listenerOpen = true,
+            userConflict = false,
+            containersExcluded = true,
+            privateDnsDirect = true,
+            ipv6Blocked = true,
+            stunBlocked = true,
+            killSwitchOn = true
+        )
+        assertFalse(real.pass)
+    }
 }
