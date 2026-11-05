@@ -39,6 +39,8 @@ adb_retry() {
   return 1
 }
 
+adb uninstall com.privacyshield.proxy >/dev/null 2>&1 || true
+adb uninstall com.privacyshield.proxy.probe >/dev/null 2>&1 || true
 adb_retry timeout 120 adb install -r -t "$ROOT/app/build/outputs/apk/debug/app-debug.apk" || fail "could not install ShieldProxy"
 adb_retry timeout 120 adb install -r -t "$ROOT/probe/build/outputs/apk/debug/probe-debug.apk" || fail "could not install probe"
 if [ "$API" -ge 33 ]; then
