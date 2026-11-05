@@ -165,7 +165,18 @@ class ShieldVpnService : VpnService() {
         android.util.Log.i(TAG, "step=load-config")
         markEngineReady(null)
         runCatching { File(filesDir, "engine_error.txt").delete() }
-        if (running) stopEngineOnly()
+        if (running || MihomoCore.running || javaTun != null) {
+            android.util.Log.i(TAG, "step=replace-tunnel")
+            stopEngineOnly()
+            // Mihomo closes its tun fd after stop() returns. Establishing
+            // before that close deletes the new tun0 (API 33 rotate).
+            val deadline = android.os.SystemClock.elapsedRealtime() + 4_000
+            while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                val dev = runCatching { File("/proc/net/dev").readText() }.getOrDefault("")
+                if (!Regex("(?m)^\\s*tun0:").containsMatchIn(dev)) break
+                Thread.sleep(50)
+            }
+        }
         val cfg = try {
             val active = RoutingConfig.load(this)
             val saved = runCatching { com.privacyshield.proxy.core.ProfileStore.load(this) }

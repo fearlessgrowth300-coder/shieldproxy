@@ -53,39 +53,10 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-x86_64-google_apis-${{ matrix.api-level }}
+          key: avd-x86_64-google_apis-v2-${{ matrix.api-level }}
 
-      - name: Create AVD snapshot for API ${{ matrix.api-level }}
-        if: steps.avd-cache.outputs.cache-hit != 'true'
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: ${{ matrix.api-level }}
-          arch: x86_64
-          target: google_apis
-          cores: 4
-          force-avd-creation: false
-          disable-animations: false
-          ram-size: 2048
-          emulator-boot-timeout: 900
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: echo "Generated AVD snapshot for caching."
-
-      - name: Run the smoke test on API ${{ matrix.api-level }}
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: ${{ matrix.api-level }}
-          arch: x86_64
-          target: google_apis
-          cores: 4
-          force-avd-creation: false
-          # Skipping the post-boot animation settings avoids an adb broken-pipe
-          # that killed otherwise-booted API 30 and 36 emulators.
-          disable-animations: false
-          ram-size: 2048
-          emulator-boot-timeout: 900
-          # -no-snapshot-save keeps the cached snapshot from being rewritten.
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: tools/emulator-api-smoke.sh
+      - name: Boot the emulator and run the smoke test
+        run: bash tools/emulator-boot.sh ${{ matrix.api-level }}
 
       - name: Collect logcat and tombstones
         if: always()
