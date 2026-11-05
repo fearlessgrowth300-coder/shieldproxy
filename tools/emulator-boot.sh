@@ -11,6 +11,9 @@ if ! command -v sdkmanager >/dev/null; then
   BIN=$(find "$SDK/cmdline-tools" -type f -name sdkmanager | head -1)
   PATH="$(dirname "$BIN"):$PATH"
 fi
+export ANDROID_SDK_HOME="${ANDROID_SDK_HOME:-$HOME}"
+export ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+mkdir -p "$ANDROID_AVD_HOME"
 AVD=shield_api_$API
 LOG=$ROOT/emulator-boot.log
 
@@ -24,12 +27,27 @@ if [ ! -d "$SDK/system-images/android-$API/google_apis/x86_64" ]; then
   exit 1
 fi
 
-if [ ! -d "$HOME/.android/avd/${AVD}.avd" ]; then
-  echo no | avdmanager create avd -n "$AVD" \
-    -k "system-images;android-$API;google_apis;x86_64" -d pixel --force
-  CFG=$HOME/.android/avd/${AVD}.avd/config.ini
-  printf '\nhw.ramSize=2048\nhw.cpu.ncore=4\n' >> "$CFG"
+CFG="$ANDROID_AVD_HOME/${AVD}.avd/config.ini"
+if [ ! -f "$CFG" ]; then
+  # No -d: the "pixel" device id is not in every cmdline-tools package, and
+  # a failed create was hidden by `echo no | avdmanager` (the pipe's status
+  # is echo's). stdin is closed so the custom-hardware prompt cannot block.
+  if ! avdmanager create avd -n "$AVD" \
+      -k "system-images;android-$API;google_apis;x86_64" --force \
+      </dev/null > /tmp/avdmanager.log 2>&1; then
+    echo "avdmanager failed" >&2
+    cat /tmp/avdmanager.log >&2
+    exit 1
+  fi
+  cat /tmp/avdmanager.log
 fi
+if [ ! -f "$CFG" ]; then
+  echo "AVD config was not created at $CFG" >&2
+  cat /tmp/avdmanager.log >&2 || true
+  find "$HOME/.android" "$SDK" -name "${AVD}*" -o -name 'config.ini' 2>/dev/null | head -50 >&2 || true
+  exit 1
+fi
+printf '\nhw.ramSize=2048\nhw.cpu.ncore=4\n' >> "$CFG"
 
 emulator -avd "$AVD" -port 5554 -no-window -gpu swiftshader_indirect \
   -noaudio -no-boot-anim -camera-back none -no-snapshot-save \
