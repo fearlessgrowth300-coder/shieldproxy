@@ -29,12 +29,15 @@ fi
 
 CFG="$ANDROID_AVD_HOME/${AVD}.avd/config.ini"
 if [ ! -f "$CFG" ]; then
-  # No -d: the "pixel" device id is not in every cmdline-tools package, and
-  # a failed create was hidden by `echo no | avdmanager` (the pipe's status
-  # is echo's). stdin is closed so the custom-hardware prompt cannot block.
+  # Answer the hardware-profile prompt. Closing stdin makes this cmdline-tools
+  # build throw "offset 0, count -1" and create nothing. A pipe would hide
+  # avdmanager's exit code, so the answer is a heredoc.
   if ! avdmanager create avd -n "$AVD" \
       -k "system-images;android-$API;google_apis;x86_64" --force \
-      </dev/null > /tmp/avdmanager.log 2>&1; then
+      > /tmp/avdmanager.log 2>&1 <<EOF
+no
+EOF
+  then
     echo "avdmanager failed" >&2
     cat /tmp/avdmanager.log >&2
     exit 1
