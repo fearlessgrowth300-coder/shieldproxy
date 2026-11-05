@@ -34,7 +34,7 @@ ShieldProxy is installed in both the personal user and the Android work profile.
 
 The hook in a work profile must use the listener published by the ShieldProxy running in that same user. A listener on the personal user's `127.0.0.1` is not the work profile's loopback. Package queries and `addDisallowedApplication` apply only to the user whose VPN is up.
 
-Each profile needs its own Always-on VPN and "Block connections without VPN" under that profile's Settings → VPN. The kill switch is stored in that profile's app data and defaults to on.
+Each profile has its own kill switch, stored in that profile's app data, and it defaults to on. Always-on VPN and "Block connections without VPN" are optional system settings. Leave them off: while they are on, Android waits for this tunnel and the phone loses its connection if the tunnel is not up.
 
 `tools/profile-instances.sh` and `tools/profile-instances.ps1` print each instance's user, UID, and last exit IP from logcat tag `ShieldProfile`.
 

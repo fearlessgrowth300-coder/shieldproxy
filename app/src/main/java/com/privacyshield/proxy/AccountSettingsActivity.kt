@@ -4,7 +4,6 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
-import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -79,14 +78,6 @@ class AccountSettingsActivity : AppCompatActivity() {
         root.addView(actionButton("Back up proxies and routes to Drive") { emit(ACTION_BACKUP) })
         root.addView(actionButton("Restore proxies and routes from Drive") { emit(ACTION_RESTORE) })
 
-        root.addView(actionButton("Open this profile's VPN settings") {
-            try { startActivity(Intent(Settings.ACTION_VPN_SETTINGS)) }
-            catch (_: Exception) { toast("Could not open VPN settings") }
-        })
-        root.addView(TextView(this).apply {
-            text = AndroidProfile.vpnGuidance(profile.managed)
-            textSize = 14f; setTextColor(Color.LTGRAY); setPadding(0, gap, 0, gap)
-        })
         root.addView(sectionLabel("Route isolation"))
         root.addView(actionButton(killSwitchLabel()) { toggleKillSwitch(it as Button) })
         root.addView(actionButton(crashPrivacyLabel()) { toggleCrashPrivacy(it as Button) })

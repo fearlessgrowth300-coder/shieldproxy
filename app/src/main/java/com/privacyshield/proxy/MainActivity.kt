@@ -240,12 +240,12 @@ class MainActivity : AppCompatActivity() {
             recoverProtectedDataAsync()
         }
         val on = ShieldVpnService.isRunning(this)
-        val profile = com.privacyshield.proxy.core.AndroidProfile.current(this)
-        val base = profile.label + "\n" + when {
+        val active = ProfileStore.activeId(this)?.let { ProfileStore.get(this, it) }
+        val base = when {
             protectedDataError != null -> "Locked · $protectedDataError"
-            on -> "Protected · Engine on" + (ProfileStore.activeId(this)?.let { id ->
-                ProfileStore.get(this, id)?.let { " · ${it.name}" }
-            } ?: "")
+            on -> "Protected · Engine on" + com.privacyshield.proxy.core.DeviceRoute.headerSuffix(
+                active?.name, active?.config
+            )
             lastError.isNotEmpty() -> "Needs attention · $lastError"
             else -> "Ready · Engine off"
         }

@@ -51,6 +51,39 @@ class RouteIsolationConfigTest {
     }
 
     @Test
+    fun strictPrivateDnsIsCarriedOn853AndNotFakeIped() {
+        val cfg = RoutingConfig()
+        cfg.nodes.add(node("London", tls = true))
+        cfg.finalTarget = "London"
+        val yaml = cfg.toClashYaml(privateDnsHost = "dns.adguard.com")
+        assertTrue(yaml.contains("fake-ip-filter:"))
+        assertTrue(yaml.contains("dns.adguard.com"))
+        assertTrue(yaml.contains("AND,((NETWORK,tcp),(DST-PORT,853)),DIRECT"))
+        val rules = yaml.substringAfter("rules:\n")
+        val dot = rules.indexOf("DST-PORT,853")
+        val v6 = rules.indexOf("IP-CIDR6,::/0,REJECT-DROP")
+        assertTrue(dot >= 0)
+        assertTrue(v6 < 0 || dot < v6)
+    }
+
+    @Test
+    fun cloneListDoesNotBecomeThePhoneRoute() {
+        val cfg = RoutingConfig()
+        cfg.nodes.add(node("debbiewealthmum"))
+        cfg.bbMap[tag(18, "com.instagram.android")] = "debbiewealthmum"
+        cfg.finalTarget = "debbiewealthmum"
+        val phone = DeviceRoute.phoneConfig(cfg)
+        assertEquals("DIRECT", phone.finalTarget)
+        assertEquals("", DeviceRoute.headerSuffix("debbiewealthmum", cfg))
+        val whole = RoutingConfig()
+        whole.nodes.add(node("home"))
+        whole.appMap["com.android.chrome"] = "home"
+        whole.finalTarget = "home"
+        assertEquals("home", DeviceRoute.phoneConfig(whole).finalTarget)
+        assertEquals(" · home", DeviceRoute.headerSuffix("home", whole))
+    }
+
+    @Test
     fun listenerPortsStayPutWhenAnotherCloneIsAdded() {
         val first = tag(1, "com.instagram.android")
         val before = CloneListeners.assignPorts(listOf(first))

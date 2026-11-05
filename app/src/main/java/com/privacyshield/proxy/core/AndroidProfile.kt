@@ -30,13 +30,12 @@ object AndroidProfile {
         if (managed) "ShieldProxy work u$userId" else "ShieldProxy u$userId"
 
     fun vpnGuidance(managed: Boolean): String {
-        val where = if (managed)
-            "Open Settings inside this work profile (not the personal profile's Settings)."
-        else
-            "Open Settings for this Android user."
-        return "$where Then go to Network & internet → VPN → ShieldProxy and turn on " +
-            "Always-on VPN and Block connections without VPN. Each profile has its own VPN " +
-            "and its own kill switch. Setting them in one profile does not set them in the other."
+        val where = if (managed) "this work profile" else "this Android user"
+        return "ShieldProxy in $where has its own VPN and its own kill switch. " +
+            "Leave Always-on VPN and Block connections without VPN off. " +
+            "Turning those on makes Android wait for this tunnel, and the phone " +
+            "loses its connection when the tunnel is not up. The kill switch " +
+            "in this screen is what closes a clone when its route fails."
     }
 
     fun current(ctx: Context): Snapshot {
