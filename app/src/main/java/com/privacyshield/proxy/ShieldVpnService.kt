@@ -34,6 +34,7 @@ class ShieldVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.privacyshield.proxy.START"
         const val ACTION_STOP = "com.privacyshield.proxy.STOP"
+        const val ACTION_ENGINE = "com.privacyshield.proxy.ENGINE"
         private const val CHANNEL_ID = "shieldproxy_vpn"
         private const val NOTIF_ID = 1
         private const val WATCHDOG_MS = 20_000L
@@ -62,14 +63,16 @@ class ShieldVpnService : VpnService() {
          * own app's services across all processes).
          */
         fun isRunning(ctx: android.content.Context): Boolean {
-            return try {
-                val am = ctx.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-                @Suppress("DEPRECATION")
-                am.getRunningServices(Int.MAX_VALUE).any {
-                    it.service.className == ShieldVpnService::class.java.name
-                }
-            } catch (_: Exception) {
-                false
+            val marker = File(ctx.filesDir, "engine_ready.txt")
+            val text = runCatching { if (marker.isFile) marker.readText() else "" }.getOrDefault("")
+            val age = if (marker.isFile) System.currentTimeMillis() - marker.lastModified() else Long.MAX_VALUE
+            return com.privacyshield.proxy.core.EngineStatus.isUp(text, age) { pid ->
+                val cmdFile = File("/proc/$pid/cmdline")
+                if (!cmdFile.exists()) return@isUp null
+                val cmd = runCatching {
+                    String(cmdFile.readBytes(), Charsets.ISO_8859_1)
+                }.getOrNull() ?: return@isUp null
+                if (cmd.isBlank()) null else cmd.contains("privacyshield")
             }
         }
     }
@@ -115,6 +118,8 @@ class ShieldVpnService : VpnService() {
                             noteFailure("watchdog restart crashed: ${t.message}")
                         }
                     }
+                } else {
+                    runCatching { File(filesDir, "engine_ready.txt").setLastModified(System.currentTimeMillis()) }
                 }
                 watchdog.postDelayed(this, WATCHDOG_MS)
             }
@@ -123,7 +128,21 @@ class ShieldVpnService : VpnService() {
 
     private fun markEngineReady(token: String?) {
         val marker = File(filesDir, "engine_ready.txt")
-        if (token == null) marker.delete() else marker.writeText(token)
+        if (token == null) {
+            marker.delete()
+            publishEngine(false)
+        } else {
+            marker.writeText(com.privacyshield.proxy.core.EngineStatus.marker(
+                token, android.os.Process.myPid()
+            ))
+            publishEngine(true)
+        }
+    }
+
+    private fun publishEngine(on: Boolean) {
+        sendBroadcast(
+            Intent(ACTION_ENGINE).setPackage(packageName).putExtra("on", on)
+        )
     }
 
     private fun noteFailure(message: String) {

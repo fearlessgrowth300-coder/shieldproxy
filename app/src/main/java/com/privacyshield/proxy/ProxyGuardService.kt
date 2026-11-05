@@ -335,7 +335,9 @@ class ProxyGuardService : Service() {
                         val killSwitch = com.privacyshield.proxy.core.KillSwitchStore.isEnabled(this)
                         if (shouldStopClone(
                                 killSwitch, a.routeId, route.routeId, route.state,
-                                a.expectedExitIp, route.exitIp, route.ok && route.exitIp.isNotBlank()
+                                a.expectedExitIp, route.exitIp,
+                                route.ok && route.exitIp.isNotBlank(),
+                                route.error
                             )) {
                             val reason = listOf(route.state, route.error)
                                 .filter { it.isNotBlank() }
@@ -350,7 +352,15 @@ class ProxyGuardService : Service() {
                             ui.post { updateNotif() }
                             return@execute
                         } else if (!route.ok || route.exitIp.isBlank()) {
-                            // Locale/timezone/sensor checks and third-party exit endpoints can be
+                            if (com.privacyshield.proxy.core.CloneLaunchGate.isSensorOnly(route.error)
+                                && route.exitIp.equals(a.expectedExitIp, ignoreCase = true)) {
+                                a.routeProbeStrikes = 0
+                                android.util.Log.w(
+                                    "ProxyGuardService",
+                                    "sensor isolation unconfirmed; leaving clone open tag=${a.tag}"
+                                )
+                            } else {
+                            // Locale/timezone and third-party exit endpoints can be
                             // temporarily unavailable while the exact assigned route is still
                             // active. They are diagnostics, not proof of a direct-IP or cross-clone
                             // route change. Keep the app open and retry on the next monitor pass.
@@ -361,6 +371,7 @@ class ProxyGuardService : Service() {
                                 "soft route verification failure kept open tag=${a.tag} " +
                                     "route=${route.routeId} state=${route.state}"
                             )
+                            }
                         } else {
                             a.routeProbeStrikes = 0
                         }
@@ -638,15 +649,20 @@ class ProxyGuardService : Service() {
             state: String,
             expectedExitIp: String,
             observedExitIp: String,
-            routeOk: Boolean
+            routeOk: Boolean,
+            error: String = ""
         ): Boolean {
             val identityBroken = isConfirmedRouteIdentityViolation(
                 expectedRouteId, observedRouteId, state
             )
             if (!killSwitchEnabled) return identityBroken
             if (identityBroken) return true
-            if (state == "GEO_GUARD_FAILED" || state == "EXIT_CHECK_FAILED" || state == "LEAK_GUARD_FAILED") {
-                return true
+            val sensorOnly = com.privacyshield.proxy.core.CloneLaunchGate.isSensorOnly(error)
+            if (state == "GEO_GUARD_FAILED" || state == "EXIT_CHECK_FAILED") return true
+            if (state == "LEAK_GUARD_FAILED" && !sensorOnly) return true
+            if (sensorOnly) {
+                return expectedExitIp.isNotBlank() && observedExitIp.isNotBlank() &&
+                    !expectedExitIp.equals(observedExitIp, ignoreCase = true)
             }
             if (!routeOk) return true
             return expectedExitIp.isNotBlank() && observedExitIp.isNotBlank() &&

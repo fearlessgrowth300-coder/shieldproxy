@@ -77,7 +77,7 @@ wait_vpn() {
   want=$1
   i=0
   while [ "$i" -lt 45 ]; do
-    got=$(adb_do adb shell run-as com.privacyshield.proxy cat files/engine_ready.txt 2>/dev/null | tr -d '\r\n ' || true)
+    got=$(adb_do adb shell run-as com.privacyshield.proxy cat files/engine_ready.txt 2>/dev/null | head -n 1 | tr -d '\r' || true)
     if vpn_up && [ "$got" = "$want" ]; then
       return 0
     fi
@@ -152,6 +152,45 @@ if ! python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$L
   fail "clone listener $LP did not accept a connection"
 fi
 echo "listener=$LP" | tee -a "$OUT/result.txt"
+
+echo "open-clone" | tee -a "$OUT/result.txt"
+BEFORE_CLONE=$(connects "$OUT/socks-a.log")
+adb shell run-as com.privacyshield.proxy rm files/smoke_result.txt >/dev/null 2>&1 || true
+smoke open-clone 18080
+wait_file com.privacyshield.proxy smoke_result.txt || fail "open-clone produced no result"
+grep -q "open=allowed" "$OUT/smoke_result.txt" || fail "clone launch blocked: $(cat "$OUT/smoke_result.txt")"
+grep -q "warning=sensor" "$OUT/smoke_result.txt" || fail "sensor warning missing: $(cat "$OUT/smoke_result.txt")"
+grep -q "header=on" "$OUT/smoke_result.txt" || fail "header stayed off while the engine was up: $(cat "$OUT/smoke_result.txt")"
+grep -q "socks=ok" "$OUT/smoke_result.txt" || fail "clone listener rejected the handshake: $(cat "$OUT/smoke_result.txt")"
+grep -q "dnsBlocked=true" "$OUT/smoke_result.txt" || fail "a dns isolation failure did not stay blocking"
+i=0
+while [ "$i" -lt 15 ]; do
+  now=$(connects "$OUT/socks-a.log")
+  if [ "$now" -gt "$BEFORE_CLONE" ]; then
+    break
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+if [ "$i" -ge 15 ]; then
+  fail "clone SOCKS connect did not reach the exit proxy"
+fi
+
+echo "header-tap" | tee -a "$OUT/result.txt"
+adb shell run-as com.privacyshield.proxy rm files/header_tap.txt >/dev/null 2>&1 || true
+adb shell run-as com.privacyshield.proxy rm files/header_ready.txt >/dev/null 2>&1 || true
+adb shell am start -n com.privacyshield.proxy/.EngineMarkActivity
+wait_file com.privacyshield.proxy header_ready.txt || fail "engine button did not bind"
+adb_do adb shell uiautomator dump /sdcard/uidump.xml || fail "could not dump the engine button"
+adb pull /sdcard/uidump.xml "$OUT/uidump.xml" || fail "could not pull the engine button dump"
+if ! TAP=$(python3 "$ROOT/tools/tap_mark.py" "$OUT/uidump.xml" 2>"$OUT/tap_mark.txt"); then
+  fail "engine button was not a clickable Button: $(cat "$OUT/tap_mark.txt")"
+fi
+adb shell input tap $TAP
+wait_file com.privacyshield.proxy header_tap.txt || fail "tap on the engine button did nothing"
+adb logcat -d -s ShieldVpn:I | grep -q "step=header-tap" || fail "header tap was not logged"
+echo "headerTap=$TAP" | tee -a "$OUT/result.txt"
+
 probe "$OUT/socks-a.log"
 
 echo "toggle" | tee -a "$OUT/result.txt"

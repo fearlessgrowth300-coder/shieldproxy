@@ -5,5 +5,8 @@
         <activity
             android:name=".EmulatorSmokeActivity"
             android:exported="true" />
+        <activity
+            android:name=".EngineMarkActivity"
+            android:exported="true" />
     </application>
 </manifest>

@@ -126,7 +126,15 @@ class MainActivity : AppCompatActivity() {
             )
         }
         status = findViewById(R.id.homeStatus)
-        findViewById<TextView>(R.id.homeEngineMark).setOnClickListener { onHeaderEngineTap() }
+        val mark = findViewById<View>(R.id.homeEngineMark)
+        val row = findViewById<View>(R.id.homeEngineRow)
+        val tap = View.OnClickListener { onHeaderEngineTap() }
+        mark.setOnClickListener(tap)
+        row.setOnClickListener(tap)
+        android.util.Log.i(
+            "ShieldVpn",
+            "step=header-bound class=${mark.javaClass.name} clickable=${mark.isClickable}"
+        )
         accountBackup = findViewById(R.id.accountBackup)
         accountBackup.setOnClickListener { openAccountSettings() }
         findViewById<Button>(R.id.privacyScan).setOnClickListener {
@@ -190,7 +198,24 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (::status.isInitialized) {
+            ContextCompat.registerReceiver(
+                this, engineReceiver,
+                android.content.IntentFilter(ShieldVpnService.ACTION_ENGINE),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        }
+    }
+
+    override fun onStop() {
+        if (::status.isInitialized) runCatching { unregisterReceiver(engineReceiver) }
+        super.onStop()
+    }
+
     override fun onPause() {
+        if (::status.isInitialized) status.removeCallbacks(enginePoll)
         super.onPause()
         // Keep the cloud copy current so a re-login always restores the latest setup.
         SupaSync.pushAsync(this)
@@ -205,6 +230,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
         refresh()
+        status.removeCallbacks(enginePoll)
+        status.postDelayed(enginePoll, 1000)
         maybeShowSetupHealth()
     }
 
@@ -246,6 +273,28 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             .show()
+    }
+
+    private val enginePoll = object : Runnable {
+        override fun run() {
+            if (isFinishing || !::status.isInitialized) return
+            refreshEngineHeader()
+            status.postDelayed(this, 1000)
+        }
+    }
+
+    private val engineReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: Intent?) {
+            refreshEngineHeader()
+        }
+    }
+
+    private fun refreshEngineHeader() {
+        if (!::status.isInitialized || isFinishing) return
+        val on = ShieldVpnService.isRunning(this)
+        val text = status.text?.toString().orEmpty()
+        val showsOn = text.startsWith("Protected · Engine on")
+        if (on != showsOn) refresh()
     }
 
     private fun refresh() {
@@ -884,24 +933,26 @@ class MainActivity : AppCompatActivity() {
                     tested.city, tested.region, tested.latitude, tested.longitude,
                     tested.timezoneId
                 )
-            if (!verified.ok || verified.routeId.isBlank()
-                || verified.exitIp.isBlank()
-                || !verified.exitIp.equals(tested.ip, ignoreCase = true)) {
+            val gate = com.privacyshield.proxy.core.CloneLaunchGate.decide(
+                verified.ok, verified.routeId, verified.exitIp, tested.ip,
+                verified.error, verified.state
+            )
+            if (gate.block != null) {
                 com.privacyshield.proxy.core.BlackBoxBridge.stopClone(this, auth, uid, pkg)
-                val reason = verified.error.ifBlank {
-                    if (verified.exitIp.isNotBlank() && !verified.exitIp.equals(tested.ip, ignoreCase = true))
-                        "In-guest exit ${verified.exitIp} did not match the proxy exit ${tested.ip}."
-                    else "Route verification failed (${verified.state.ifBlank { "unknown state" }})."
-                }
+                android.util.Log.e("ShieldVpn", "step=launch-blocked ${gate.block}")
                 runOnUiThread {
                     hideOpenProgress()
-                    showCloneFailure(label, reason)
+                    showCloneFailure(label, gate.block)
                 }
                 return@Thread
+            }
+            if (gate.warning != null) {
+                android.util.Log.w("ShieldVpn", "step=sensor-warn ${verified.error}")
             }
 
             runOnUiThread {
                 hideOpenProgress()
+                if (gate.warning != null) toast(gate.warning)
                 if (startCloneActivity(auth, uid, pkg)) {
                     toast("Connected and isolated - ${tested.city.ifBlank { tested.ip }}")
                     ProxyGuardService.arm(
