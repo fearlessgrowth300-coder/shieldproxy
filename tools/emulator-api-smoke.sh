@@ -239,8 +239,11 @@ if [ -n "${MEM:-}" ] && [ "$MEM" -gt 900000 ]; then
 fi
 
 adb logcat -d -v threadtime > "$OUT/logcat.txt" || true
-if grep -E "FATAL EXCEPTION|ANR in com.privacyshield|Fatal signal .*privacyshield" "$OUT/logcat.txt"; then
-  fail "logcat contains a fatal exception, native crash, or ANR in ShieldProxy"
+if grep -A 2 -E "FATAL EXCEPTION" "$OUT/logcat.txt" | grep -q "Process: com.privacyshield"; then
+  fail "logcat contains a fatal exception in ShieldProxy"
+fi
+if grep -E "ANR in com.privacyshield|Fatal signal .*privacyshield" "$OUT/logcat.txt"; then
+  fail "logcat contains a native crash or ANR in ShieldProxy"
 fi
 if adb shell ls /data/tombstones 2>/dev/null | grep -q .; then
   mkdir -p "$OUT/tombstones"

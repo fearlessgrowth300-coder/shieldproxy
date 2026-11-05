@@ -23,6 +23,9 @@ import java.io.File
 class ShieldVpnService : VpnService() {
 
     private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
+    /** Dup of the tun fd. Mihomo owns a different fd number. Closing this one
+     *  after Mihomo.stop() drops tun0 when the native side keeps its copy. */
+    private var javaTun: ParcelFileDescriptor? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -45,6 +48,9 @@ class ShieldVpnService : VpnService() {
         // and the core never loads. This thread is not quit on destroy.
         private val tunnelThread = android.os.HandlerThread("shield-vpn").apply { start() }
         private val tunnel = android.os.Handler(tunnelThread.looper)
+        // Survives a new service instance in this process. Reusing a tun fd
+        // number Mihomo already closed leaves tun0 up on the next stop.
+        private var nextMihomoFd = 300
 
         @Volatile
         var running: Boolean = false
@@ -229,8 +235,22 @@ class ShieldVpnService : VpnService() {
             noteFailure("establish returned null (VPN consent missing or revoked)")
             endService(); return
         }
-        val tunFd = pfd.detachFd()
-        android.util.Log.i(TAG, "step=establish fd=$tunFd")
+        val owned = ParcelFileDescriptor.adoptFd(pfd.detachFd())
+        var mihomoFd = nextMihomoFd
+        while (File("/proc/self/fd/$mihomoFd").exists() && mihomoFd < 600) mihomoFd++
+        nextMihomoFd = mihomoFd + 1
+        if (nextMihomoFd > 500) nextMihomoFd = 300
+        try {
+            // A fresh number every time. Reusing a tun fd Mihomo already closed
+            // makes the next stop leave tun0 up.
+            android.system.Os.dup2(owned.fileDescriptor, mihomoFd)
+        } catch (e: Exception) {
+            owned.close()
+            noteFailure("dup tun failed: ${e.message}")
+            endService(); return
+        }
+        javaTun = owned
+        android.util.Log.i(TAG, "step=establish fd=$mihomoFd")
 
         // Mihomo home dir holds config.yaml + downloaded geo/provider files.
         val home = File(filesDir, "mihomo").apply { mkdirs() }
@@ -253,7 +273,7 @@ class ShieldVpnService : VpnService() {
         // proxy via fake-ip.
         val serverResolver: (String) -> String? = { host -> resolved[host] }
         configFile.writeText(cfg.toClashYaml(
-            tunFd, uidResolver, serverResolver,
+            mihomoFd, uidResolver, serverResolver,
             com.privacyshield.proxy.core.PrivateDns.strictHost(this)
         ))
 
@@ -296,7 +316,7 @@ class ShieldVpnService : VpnService() {
         runCatching { configFile.delete() }
         if (err.isNotEmpty()) {
             noteFailure("mihomo: $err")
-            runCatching { ParcelFileDescriptor.adoptFd(tunFd).close() }
+            runCatching { ParcelFileDescriptor.adoptFd(mihomoFd).close() }
             stopTunnel()
             return
         }
@@ -314,6 +334,8 @@ class ShieldVpnService : VpnService() {
             MihomoCore.stop()
             running = false
         }
+        runCatching { javaTun?.close() }
+        javaTun = null
         markEngineReady(null)
     }
 

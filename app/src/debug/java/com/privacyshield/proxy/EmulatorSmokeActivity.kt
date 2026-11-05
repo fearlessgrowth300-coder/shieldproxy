@@ -79,10 +79,17 @@ class EmulatorSmokeActivity : Activity() {
     private fun openClone(): String {
         val port = CloneListeners.portFor("emu.bridge", 1, "com.android.chrome")
         val tag = CloneListeners.tag("emu.bridge", 1, "com.android.chrome")
-        val socks = runCatching {
-            cloneSocks(port, CloneListeners.socksUser(tag), CloneListeners.socksPassword(tag))
-            "socks=ok"
-        }.getOrElse { "socks=fail:${it.javaClass.simpleName}:${it.message}" }
+        val socks = java.util.concurrent.atomic.AtomicReference("socks=fail:timeout")
+        val worker = Thread {
+            try {
+                cloneSocks(port, CloneListeners.socksUser(tag), CloneListeners.socksPassword(tag))
+                socks.set("socks=ok")
+            } catch (error: Throwable) {
+                socks.set("socks=fail:${error.javaClass.simpleName}:${error.message}")
+            }
+        }
+        worker.start()
+        worker.join(15_000)
         val gate = com.privacyshield.proxy.core.CloneLaunchGate.decide(
             ok = false,
             routeId = "emu-route",
@@ -101,7 +108,7 @@ class EmulatorSmokeActivity : Activity() {
         )
         val header = if (ShieldVpnService.isRunning(this)) "header=on" else "header=off"
         val open = if (gate.block == null) "open=allowed" else "open=blocked"
-        return "$open warning=sensor $header $socks dnsBlocked=${dns.block != null}"
+        return "$open warning=sensor $header ${socks.get()} dnsBlocked=${dns.block != null}"
     }
 
     private fun cloneSocks(port: Int, user: String, pass: String) {
