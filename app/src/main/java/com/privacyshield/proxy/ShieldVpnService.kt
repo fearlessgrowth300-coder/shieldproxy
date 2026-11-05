@@ -151,6 +151,15 @@ class ShieldVpnService : VpnService() {
         )
     }
 
+    private fun loadPhoneConfig(): com.privacyshield.proxy.core.RoutingConfig {
+        val active = RoutingConfig.load(this)
+        val saved = runCatching { com.privacyshield.proxy.core.ProfileStore.load(this) }
+            .getOrDefault(emptyList())
+        return com.privacyshield.proxy.core.DeviceRoute.phoneConfig(
+            com.privacyshield.proxy.core.EngineRoutes.merge(active, saved.map { it.config })
+        )
+    }
+
     private fun noteFailure(message: String) {
         android.util.Log.e(TAG, "step=failed $message")
         lastError = message
@@ -178,16 +187,18 @@ class ShieldVpnService : VpnService() {
             }
         }
         val cfg = try {
-            val active = RoutingConfig.load(this)
-            val saved = runCatching { com.privacyshield.proxy.core.ProfileStore.load(this) }
-                .getOrDefault(emptyList())
-            com.privacyshield.proxy.core.DeviceRoute.phoneConfig(
-                com.privacyshield.proxy.core.EngineRoutes.merge(active, saved.map { it.config })
-            )
-        } catch (e: Exception) {
-            noteFailure("Protected routing data could not be unlocked")
-            endService()
-            return
+            loadPhoneConfig()
+        } catch (_: Exception) {
+            // The UI process may have just committed the vault key. A second
+            // process on API 26 sometimes cannot read it on the first try.
+            Thread.sleep(500)
+            try {
+                loadPhoneConfig()
+            } catch (e: Exception) {
+                noteFailure("Protected routing data could not be unlocked")
+                endService()
+                return
+            }
         }
         android.util.Log.i(TAG, "step=config nodes=${cfg.nodes.size} clones=${cfg.bbMap.size} final=${cfg.finalTarget}")
 

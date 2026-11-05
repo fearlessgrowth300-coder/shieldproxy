@@ -36,7 +36,7 @@ object VaultKeyStore {
             .putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
             .putString("key", Base64.encodeToString(encrypted, Base64.NO_WRAP))
             .putString("owner", ownerHash(normalizedEmail))
-            .apply()
+            .commit()
     }
 
     fun load(ctx: Context): SecretKeySpec? = try {

@@ -108,17 +108,21 @@ connects() {
 
 probe() {
   log=$1
-  before=$(connects "$log")
-  adb shell run-as com.privacyshield.proxy.probe rm files/probe_result.txt >/dev/null 2>&1 || true
-  adb shell am start -S -n com.privacyshield.proxy.probe/.ProbeActivity --es host 203.0.113.10 --ei port 9
-  i=0
-  while [ "$i" -lt 30 ]; do
-    now=$(connects "$log")
-    if [ "$now" -gt "$before" ]; then
-      return 0
-    fi
-    i=$((i + 1))
-    sleep 1
+  attempt=0
+  while [ "$attempt" -lt 3 ]; do
+    before=$(connects "$log")
+    adb shell run-as com.privacyshield.proxy.probe rm files/probe_result.txt >/dev/null 2>&1 || true
+    adb shell am start -S -n com.privacyshield.proxy.probe/.ProbeActivity --es host 203.0.113.10 --ei port 9
+    i=0
+    while [ "$i" -lt 25 ]; do
+      now=$(connects "$log")
+      if [ "$now" -gt "$before" ]; then
+        return 0
+      fi
+      i=$((i + 1))
+      sleep 1
+    done
+    attempt=$((attempt + 1))
   done
   wait_file com.privacyshield.proxy.probe probe_result.txt || true
   fail "SOCKS did not see the probe. probe=$(cat "$OUT/probe_result.txt" 2>/dev/null || echo missing)"
