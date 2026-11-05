@@ -16,7 +16,8 @@ object AppList {
     fun installed(ctx: Context): List<AppInfo> {
         val pm = ctx.packageManager
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        val resolved = pm.queryIntentActivities(intent, 0)
+        // FLAGS is 0: this user's packages only. MATCH_ANY_USER would list the other profile.
+        val resolved = pm.queryIntentActivities(intent, PackageQuery.FLAGS)
         val seen = HashSet<String>()
         val out = ArrayList<AppInfo>()
         for (ri in resolved) {

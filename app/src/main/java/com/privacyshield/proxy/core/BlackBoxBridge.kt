@@ -157,30 +157,43 @@ object BlackBoxBridge {
 
     /** Persist one exact node for one exact clone. BlackBox stops an existing process so it
      * cannot keep using stale credentials. The returned routeId is safe to display/store and
-     * binds the later guest-process verification to this assignment. */
+     * binds the later guest-process verification to this assignment.
+     *
+     * The bundle also carries the loopback SOCKS contract ([CloneListeners]) and the verified
+     * geo/locale/tls fields. Older Blackbox builds ignore unknown extras. */
     fun setCloneProxy(
         ctx: Context, authority: String, userId: Int, pkg: String, node: ProxyNode,
         verifiedCountryIso: String = "", verifiedCity: String = "",
         verifiedRegion: String = "", verifiedLatitude: Double? = null,
-        verifiedLongitude: Double? = null, verifiedTimezoneId: String = ""
+        verifiedLongitude: Double? = null, verifiedTimezoneId: String = "",
+        geo: RouteGeo? = null
     ): BbProxyAssignment = try {
         val extras = android.os.Bundle().apply {
             putInt("userId", userId); putString("pkg", pkg)
-            putString("type", node.type); putString("server", node.server); putInt("port", node.port)
-            putString("username", node.username); putString("password", node.password)
-            putString("countryIso", verifiedCountryIso.ifBlank { node.countryIsoHint() })
-            putString("city", verifiedCity); putString("region", verifiedRegion)
-            if (verifiedLatitude != null) putDouble("latitude", verifiedLatitude)
-            if (verifiedLongitude != null) putDouble("longitude", verifiedLongitude)
-            putString("timezoneId", verifiedTimezoneId)
+            putProxyContract(this, authority, userId, pkg, node, geo ?: RouteGeo(
+                countryIso = verifiedCountryIso,
+                city = verifiedCity,
+                region = verifiedRegion,
+                latitude = verifiedLatitude,
+                longitude = verifiedLongitude,
+                timezoneId = verifiedTimezoneId
+            ))
         }
         val r = ctx.contentResolver.call(baseFor(authority), "setProxy", null, extras)
-        BbProxyAssignment(
+        val primary = BbProxyAssignment(
             ok = r?.getBoolean("ok") == true,
             routeId = r?.getString("routeId").orEmpty(),
             state = r?.getString("state").orEmpty(),
             error = r?.getString("err").orEmpty()
         )
+        if (primary.ok && pkg !in UserRoute.SHARED_PACKAGES) {
+            for (shared in UserRoute.SHARED_PACKAGES) {
+                runCatching {
+                    setCloneProxy(ctx, authority, userId, shared, node, geo = geo)
+                }
+            }
+        }
+        primary
     } catch (e: Exception) {
         BbProxyAssignment(false, error = e.message ?: e.javaClass.simpleName)
     }
@@ -210,9 +223,10 @@ object BlackBoxBridge {
     ): BbProxyAssignment = try {
         val extras = android.os.Bundle().apply {
             putInt("userId", userId); putString("pkg", pkg)
-            putString("type", node.type); putString("server", node.server); putInt("port", node.port)
-            putString("username", node.username); putString("password", node.password)
-            putString("countryIso", node.countryIsoHint())
+            putProxyContract(this, authority, userId, pkg, node, RouteGeo(
+                countryIso = node.countryIsoHint(),
+                locale = RouteLocale.forCountry(node.countryIsoHint())
+            ))
         }
         val r = ctx.contentResolver.call(baseFor(authority), "canSetProxy", null, extras)
         BbProxyAssignment(
@@ -306,16 +320,32 @@ object BlackBoxBridge {
     ): BbRouteVerification = try {
         val extras = android.os.Bundle().apply {
             putInt("userId", userId); putString("pkg", pkg)
-            putString("type", node.type); putString("server", node.server); putInt("port", node.port)
-            putString("username", node.username); putString("password", node.password)
             putString("expectedExitIp", expectedExitIp)
-            putString("countryIso", verifiedCountryIso.ifBlank { node.countryIsoHint() })
-            putString("city", verifiedCity); putString("region", verifiedRegion)
-            if (verifiedLatitude != null) putDouble("latitude", verifiedLatitude)
-            if (verifiedLongitude != null) putDouble("longitude", verifiedLongitude)
-            putString("timezoneId", verifiedTimezoneId)
+            putProxyContract(this, authority, userId, pkg, node, RouteGeo(
+                countryIso = verifiedCountryIso,
+                city = verifiedCity,
+                region = verifiedRegion,
+                latitude = verifiedLatitude,
+                longitude = verifiedLongitude,
+                timezoneId = verifiedTimezoneId,
+                locale = RouteLocale.forCountry(verifiedCountryIso.ifBlank { node.countryIsoHint() })
+            ))
         }
         val r = ctx.contentResolver.call(baseFor(authority), "assignAndVerifyRoute", null, extras)
+        if (pkg !in UserRoute.SHARED_PACKAGES) {
+            val geo = RouteGeo(
+                countryIso = verifiedCountryIso,
+                city = verifiedCity,
+                region = verifiedRegion,
+                latitude = verifiedLatitude,
+                longitude = verifiedLongitude,
+                timezoneId = verifiedTimezoneId,
+                locale = RouteLocale.forCountry(verifiedCountryIso.ifBlank { node.countryIsoHint() })
+            )
+            for (shared in UserRoute.SHARED_PACKAGES) {
+                runCatching { setCloneProxy(ctx, authority, userId, shared, node, geo = geo) }
+            }
+        }
         BbRouteVerification(
             ok = r?.getBoolean("ok") == true,
             routeId = r?.getString("routeId").orEmpty(),
@@ -357,6 +387,80 @@ object BlackBoxBridge {
         )
     } catch (e: Exception) {
         BbWarmResult(false, error = e.message ?: e.javaClass.simpleName)
+    }
+
+    /** Plain fields the hook contract tests can read without an Android Bundle. */
+    internal data class CloneProxyContract(
+        val tls: Boolean,
+        val udp: Boolean,
+        val countryIso: String,
+        val city: String,
+        val region: String,
+        val latitude: Double?,
+        val longitude: Double?,
+        val timezoneId: String,
+        val locale: String,
+        val localPort: Int,
+        val localHost: String,
+        val socksUser: String,
+        val socksPassword: String
+    )
+
+    internal fun contractFor(
+        authority: String, userId: Int, pkg: String, node: ProxyNode, geo: RouteGeo
+    ): CloneProxyContract {
+        val country = geo.countryIso.ifBlank { node.countryIsoHint() }
+        val user = CloneListeners.userTag(authority, userId)
+        return CloneProxyContract(
+            tls = node.tls,
+            udp = node.udp,
+            countryIso = country,
+            city = geo.city,
+            region = geo.region,
+            latitude = geo.latitude,
+            longitude = geo.longitude,
+            timezoneId = geo.timezoneId,
+            locale = geo.locale.ifBlank { RouteLocale.forCountry(country) },
+            localPort = CloneListeners.portForUser(authority, userId),
+            localHost = "127.0.0.1",
+            socksUser = CloneListeners.socksUser(user),
+            socksPassword = CloneListeners.socksPassword(user)
+        )
+    }
+
+    /**
+     * Fields the Blackbox hook needs in addition to the upstream proxy.
+     */
+    internal fun putProxyContract(
+        extras: android.os.Bundle,
+        authority: String,
+        userId: Int,
+        pkg: String,
+        node: ProxyNode,
+        geo: RouteGeo
+    ) {
+        val contract = contractFor(authority, userId, pkg, node, geo)
+        extras.putString("type", node.type)
+        extras.putString("server", node.server)
+        extras.putInt("port", node.port)
+        extras.putString("username", node.username)
+        extras.putString("password", node.password)
+        extras.putBoolean("tls", contract.tls)
+        extras.putBoolean("udp", contract.udp)
+        extras.putString("countryIso", contract.countryIso)
+        extras.putString("city", contract.city)
+        extras.putString("region", contract.region)
+        if (contract.latitude != null) extras.putDouble("latitude", contract.latitude)
+        if (contract.longitude != null) extras.putDouble("longitude", contract.longitude)
+        extras.putString("timezoneId", contract.timezoneId)
+        extras.putString("locale", contract.locale)
+        extras.putInt("localPort", contract.localPort)
+        extras.putString("localHost", contract.localHost)
+        extras.putString("socksUser", contract.socksUser)
+        extras.putString("socksPassword", contract.socksPassword)
+        // Every package in this Blackbox user, including Play Store and GMS, uses this listener.
+        extras.putString("scope", "user")
+        extras.putInt("packageLocalPort", CloneListeners.portFor(authority, userId, pkg))
     }
 
     /** Is this clone's process currently alive? Lets the guard nag/kill only when in use. */

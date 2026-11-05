@@ -17,7 +17,8 @@ import android.content.Context
  */
 object AssignmentRules {
 
-    /** Instagram + WhatsApp packages (incl. business / lite) that each demand their own user. */
+    /** Instagram + WhatsApp packages (incl. business / lite) that each demand their own user.
+     *  [SensitiveAppStore] can add more packages. The built-in set always applies. */
     val SENSITIVE = setOf(
         "com.instagram.android", "com.instagram.lite",
         "com.whatsapp", "com.whatsapp.w4b"
@@ -84,15 +85,53 @@ object AssignmentRules {
         ProfileStore.load(ctx).filter { it.id != thisProfileId }
             .forEach { allTags.addAll(it.config.bbMap.keys) }
         allTags.addAll(tags)
-        return sensitiveCoLocationsFromTags(allTags)
+        return sensitiveCoLocationsFromTags(allTags, SensitiveAppStore.packages(ctx))
     }
 
-    internal fun sensitiveCoLocationsFromTags(tags: Collection<String>): List<String> {
+    internal fun sensitiveCoLocationsFromTags(
+        tags: Collection<String>,
+        sensitive: Set<String> = SENSITIVE
+    ): List<String> {
         val byUser = HashMap<String, MutableList<String>>()
         for (t in tags.mapNotNull { parse(it) }) {
-            if (t.pkg in SENSITIVE) byUser.getOrPut(t.user) { mutableListOf() }.add(t.pkg)
+            if (t.pkg in sensitive) byUser.getOrPut(t.user) { mutableListOf() }.add(t.pkg)
         }
         return byUser.filterValues { it.size > 1 }.keys.toList()
+    }
+
+    /**
+     * Two clone routes whose proxies share a server+username or a provider `package-<id>`.
+     * The same node on one shared-GMS user is allowed, because that user must share one exit.
+     */
+    internal fun sharedUpstreamViolations(
+        assignments: List<Pair<Tag, ProxyNode>>,
+        sharedGmsUsers: Set<String> = emptySet()
+    ): List<String> {
+        val out = ArrayList<String>()
+        for (i in assignments.indices) {
+            for (j in i + 1 until assignments.size) {
+                val (left, leftNode) = assignments[i]
+                val (right, rightNode) = assignments[j]
+                if (!sharesUpstream(leftNode, rightNode)) continue
+                val allowed = left.user == right.user &&
+                    left.user in sharedGmsUsers &&
+                    leftNode.name == rightNode.name
+                if (!allowed) {
+                    out.add("${left.pkg} (user ${left.userId}) and ${right.pkg} (user ${right.userId})")
+                }
+            }
+        }
+        return out
+    }
+
+    internal fun sharesUpstream(left: ProxyNode, right: ProxyNode): Boolean {
+        if (left.name == right.name && left.name.isNotBlank()) return true
+        val sameServer = left.server.equals(right.server, ignoreCase = true) && left.port == right.port
+        val sameUser = left.username.isNotBlank() && left.username == right.username
+        if (sameServer && sameUser) return true
+        val leftPackage = left.providerPackageId()
+        val rightPackage = right.providerPackageId()
+        return leftPackage != null && leftPackage == rightPackage
     }
 
     // 3. GMS proxy consistency ---------------------------------------------------
@@ -107,22 +146,16 @@ object AssignmentRules {
         ProfileStore.load(ctx).filter { it.id != thisProfileId }
             .forEach { combined.putAll(it.config.bbMap) }
         combined.putAll(bbMap)
+        GmsShareStore.migrate(ctx, combined.keys)
         val sharedByUser = HashMap<String, Boolean>()
-        for ((tag, node) in combined) {
+        for ((tag, _) in combined) {
             val t = parse(tag) ?: continue
-            val shared = sharedByUser.getOrPut(t.user) {
-                if (GmsShareStore.isEnabled(ctx, t.authority, t.userId)) {
-                    true
-                } else {
-                    val remote = BlackBoxBridge.userSecurityState(
-                        ctx, t.authority, t.userId
-                    )
-                    // A bridge/auth/version failure is not proof that GMS is disabled. Enforce
-                    // one route until the signed container can provide a definite answer.
-                    !remote.ok || remote.sharedGmsActive
-                }
-            }
-            sharedByUser[t.user] = shared
+            val optedIn = GmsShareStore.isEnabled(ctx, tag)
+            val remote = if (optedIn) null else BlackBoxBridge.userSecurityState(ctx, t.authority, t.userId)
+            // Only a positive answer from the container counts. A failed query is not
+            // "shared", so a new clone stays off until the user opts in.
+            val shared = optedIn || remote?.sharedGmsActive == true
+            if (shared) sharedByUser[t.user] = true
         }
         return gmsProxyInconsistenciesFromAssignments(
             combined,

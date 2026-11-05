@@ -20,6 +20,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- API 31+ exact alarms. The guard falls back when the user has not allowed them. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- Keep the proxy alive: exempt from Doze/battery-optimization so Samsung
          doesn't put the VPN service to sleep after a few minutes. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -74,7 +76,7 @@
             android:exported="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Monitors each clone's proxy and closes the app if the proxy drops" />
+                android:value="Stops a clone when its proxy drops or a leak, geo, or exit check fails, unless the kill switch is turned off" />
         </service>
 
         <service
@@ -103,7 +105,8 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- Signed two-way handshake used by BlackBox's Settings page. -->
+        <!-- Signed handshake for BlackBox in THIS Android user. Must not be singleUser:
+             a work profile has its own provider, session, and routes. -->
         <provider
             android:name=".core.ShieldBridgeProvider"
             android:authorities="com.privacyshield.proxy.bridge"

@@ -12,6 +12,7 @@ import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.privacyshield.proxy.core.CloudSync
+import com.privacyshield.proxy.core.ForegroundStarts
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Foreground, wake-locked encrypted backup/restore execution. */
@@ -33,7 +34,9 @@ class BackupService : Service() {
         val snapshot = intent.getStringExtra(EXTRA_SNAPSHOT)
         createChannel()
         val label = if (operation == ACTION_BACKUP) "Preparing encrypted backup" else "Preparing encrypted restore"
-        startForeground(NOTIFICATION_ID, notification(label, 0L, true).build())
+        ForegroundStarts.start(
+            this, NOTIFICATION_ID, notification(label, 0L, true).build(), ForegroundStarts.DATA_SYNC
+        )
         saveState(operation, "running", label, 0L)
         worker = Thread {
             val lock = (getSystemService(POWER_SERVICE) as PowerManager)

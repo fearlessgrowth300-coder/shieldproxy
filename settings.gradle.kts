@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "ShieldProxy"
 include(":app")
+include(":probe")

@@ -262,7 +262,11 @@ class ProfileEditActivity : AppCompatActivity() {
             .sensitiveCoLocations(this, profileId, tags)
         val gms = com.privacyshield.proxy.core.AssignmentRules
             .gmsProxyInconsistencies(this, profileId, intendedBb)
-        if (conflicts.isEmpty() && coloc.isEmpty() && gms.isEmpty()) { commitPerApp(name, valid); return }
+        val upstream = sharedUpstreamViolations(intendedBb)
+        if (conflicts.isEmpty() && coloc.isEmpty() && gms.isEmpty() && upstream.isEmpty()) {
+            Thread { commitPerApp(name, valid) }.start()
+            return
+        }
 
         val msg = StringBuilder()
         if (conflicts.isNotEmpty()) {
@@ -279,7 +283,12 @@ class ProfileEditActivity : AppCompatActivity() {
                 .append(gms.joinToString { it.user }).append(" would use ")
                 .append(gms.sumOf { it.nodes.size }).append(" different proxies.\n\n")
         }
-        val hardBlock = coloc.isNotEmpty() || gms.isNotEmpty()
+        if (upstream.isNotEmpty()) {
+            msg.append("⚠ These routes share a proxy server, username, or provider package id:\n")
+            upstream.forEach { msg.append(" • ").append(it).append("\n") }
+            msg.append("\nEach route needs its own provider session. Shared-GMS clones on one user may keep a single node.\n\n")
+        }
+        val hardBlock = coloc.isNotEmpty() || gms.isNotEmpty() || upstream.isNotEmpty()
         val b = AlertDialog.Builder(this)
             .setTitle(if (conflicts.isNotEmpty()) "Move clone(s)?" else "Isolation warning")
             .setMessage(msg.toString().trim())
@@ -291,10 +300,33 @@ class ProfileEditActivity : AppCompatActivity() {
         } else if (conflicts.isNotEmpty()) {
             b.setPositiveButton("Move here") { _, _ ->
                 com.privacyshield.proxy.core.AssignmentRules.moveTagsHere(this, profileId, conflicts.map { it.tag })
-                commitPerApp(name, valid)
+                Thread { commitPerApp(name, valid) }.start()
             }
         }
         b.show()
+    }
+
+    private fun sharedUpstreamViolations(intendedBb: Map<String, String>): List<String> {
+        val lib = ProxyLibrary.load(this)
+        val assignments = ArrayList<Pair<com.privacyshield.proxy.core.AssignmentRules.Tag, com.privacyshield.proxy.core.ProxyNode>>()
+        fun add(tag: String, node: com.privacyshield.proxy.core.ProxyNode?) {
+            val parsed = com.privacyshield.proxy.core.AssignmentRules.parse(tag) ?: return
+            if (node != null && node.isValid()) assignments.add(parsed to node)
+        }
+        for (profile in ProfileStore.load(this)) {
+            if (profile.id == profileId) continue
+            for ((tag, name) in profile.config.bbMap) {
+                add(tag, profile.config.nodes.firstOrNull { it.name == name })
+            }
+        }
+        for ((tag, name) in intendedBb) {
+            add(tag, lib.firstOrNull { it.node.name == name }?.node)
+        }
+        com.privacyshield.proxy.core.GmsShareStore.migrate(this, assignments.map { it.first.raw })
+        val sharedUsers = assignments.map { it.first.user }.filter { user ->
+            assignments.any { it.first.user == user && com.privacyshield.proxy.core.GmsShareStore.isEnabled(this, it.first.raw) }
+        }.toSet()
+        return com.privacyshield.proxy.core.AssignmentRules.sharedUpstreamViolations(assignments, sharedUsers)
     }
 
     /** Build, validate, apply, then persist. A rejected clone never becomes a saved claim. */
@@ -353,11 +385,28 @@ class ProfileEditActivity : AppCompatActivity() {
             return
         }
 
-        // Phase 2 applies only the already-validated routes. A runtime bridge/storage failure still
-        // prevents ProfileStore from claiming an assignment BlackBox did not acknowledge.
+        // Phase 2 applies only the already-validated routes. Geography is looked up first so
+        // every assign carries timezone, locale, and coordinates, not only the launch path.
+        val geoByTag = HashMap<String, com.privacyshield.proxy.core.RouteGeo>()
+        val geoErrors = pendingClones.mapNotNull { pending ->
+            val tested = com.privacyshield.proxy.core.ProxyTester.test(pending.node, lookupMetadata = true)
+            if (!tested.geoVerified) {
+                "${AppList.labelFor(this, pending.tag)}: exit country, timezone, and coordinates could not be verified"
+            } else {
+                geoByTag[pending.tag] = com.privacyshield.proxy.core.RouteGeo.fromTest(
+                    tested, pending.node.countryIsoHint()
+                )
+                null
+            }
+        }
+        if (geoErrors.isNotEmpty()) {
+            showSaveFailure("List not saved", geoErrors)
+            return
+        }
         val commitErrors = pendingClones.mapNotNull { pending ->
             val result = com.privacyshield.proxy.core.BlackBoxBridge.setCloneProxy(
-                this, pending.authority, pending.userId, pending.pkg, pending.node
+                this, pending.authority, pending.userId, pending.pkg, pending.node,
+                geo = geoByTag.getValue(pending.tag)
             )
             if (result.ok) null else "${AppList.labelFor(this, pending.tag)}: " +
                 result.error.ifBlank { result.state.ifBlank { "BlackBox could not commit the assignment" } }
@@ -415,6 +464,17 @@ class ProfileEditActivity : AppCompatActivity() {
         val unusedRoutes = com.privacyshield.proxy.core.BlackBoxBridge.configuredRoutes(this)
             .filter { it.tag !in claimedTags }
         if (unusedRoutes.isNotEmpty()) {
+            runOnUiThread { showUnusedRoutes(unusedRoutes, profile, pendingClones.size) }
+            return
+        }
+        persistProfile(profile, pendingClones.size)
+    }
+
+    private fun showUnusedRoutes(
+        unusedRoutes: List<com.privacyshield.proxy.core.BbConfiguredRoute>,
+        profile: com.privacyshield.proxy.core.Profile,
+        cloneCount: Int
+    ) {
             val labels = unusedRoutes.take(8).joinToString("\n") {
                 " • ${AppList.labelFor(this, it.tag)}"
             } + if (unusedRoutes.size > 8) "\n • +${unusedRoutes.size - 8} more" else ""
@@ -437,17 +497,14 @@ class ProfileEditActivity : AppCompatActivity() {
                     if (errors.isNotEmpty()) {
                         showSaveFailure("List not saved", errors)
                     } else {
-                        persistProfile(profile, pendingClones.size)
+                        persistProfile(profile, cloneCount)
                     }
                 }
                 .setNegativeButton("Keep and save") { _, _ ->
-                    persistProfile(profile, pendingClones.size)
+                    persistProfile(profile, cloneCount)
                 }
                 .setNeutralButton("Cancel", null)
                 .show()
-            return
-        }
-        persistProfile(profile, pendingClones.size)
     }
 
     private fun persistProfile(profile: Profile, cloneCount: Int) {
@@ -455,11 +512,17 @@ class ProfileEditActivity : AppCompatActivity() {
         val message = if (cloneCount > 0) {
             "Saved ✓ $cloneCount clone(s) routed. Reopen them in their app to apply."
         } else "Saved ✓"
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-        finish()
+        runOnUiThread {
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            finish()
+        }
     }
 
     private fun showSaveFailure(title: String, errors: List<String>, note: String? = null) {
+        runOnUiThread { showSaveFailureOnUi(title, errors, note) }
+    }
+
+    private fun showSaveFailureOnUi(title: String, errors: List<String>, note: String? = null) {
         val distinct = errors.distinct()
         val body = buildString {
             append(distinct.take(6).joinToString("\n\n"))
