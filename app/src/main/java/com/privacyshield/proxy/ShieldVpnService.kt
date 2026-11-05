@@ -26,10 +26,9 @@ class ShieldVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
-        // Reach startForeground before any tunnel work. This does not change
-        // what the tunnel routes; it only keeps the process inside the
-        // foreground-service deadline.
+        android.util.Log.i(TAG, "step=onCreate")
         ForegroundStarts.start(this, NOTIF_ID, startingNotification(), ForegroundStarts.SPECIAL_USE)
+        android.util.Log.i(TAG, "step=${com.privacyshield.proxy.core.EngineStart.FOREGROUND}")
     }
 
     companion object {
@@ -38,6 +37,13 @@ class ShieldVpnService : VpnService() {
         private const val CHANNEL_ID = "shieldproxy_vpn"
         private const val NOTIF_ID = 1
         private const val WATCHDOG_MS = 20_000L
+        private const val TAG = com.privacyshield.proxy.core.EngineStart.TAG
+
+        // Never the main looper. establish() calls back into the app; doing that
+        // work on the main thread deadlocks after VpnManagerService logs the call
+        // and the core never loads. This thread is not quit on destroy.
+        private val tunnelThread = android.os.HandlerThread("shield-vpn").apply { start() }
+        private val tunnel = android.os.Handler(tunnelThread.looper)
 
         @Volatile
         var running: Boolean = false
@@ -69,17 +75,28 @@ class ShieldVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val action = intent?.action
+        android.util.Log.i(TAG, "step=onStartCommand action=${action ?: "null"}")
         ForegroundStarts.start(this, NOTIF_ID, startingNotification(), ForegroundStarts.SPECIAL_USE)
-        if (intent?.action == ACTION_STOP) {
+        if (action == ACTION_STOP) {
             wantRunning = false
-            stopTunnel()
+            tunnel.post {
+                android.util.Log.i(TAG, "step=stop")
+                stopTunnel()
+            }
             return START_NOT_STICKY
         }
-        // ACTION_START, or a START_STICKY restart after the process was killed
-        // (intent == null) — in that case revive from the persisted active profile.
         wantRunning = true
-        startTunnel()
-        scheduleWatchdog()
+        tunnel.post {
+            try {
+                startTunnel()
+                if (running && wantRunning) scheduleWatchdog()
+            } catch (t: Throwable) {
+                noteFailure("startTunnel crashed: ${t.javaClass.simpleName}: ${t.message}")
+                android.util.Log.e(TAG, "step=start-crashed", t)
+                stopTunnel()
+            }
+        }
         return START_STICKY
     }
 
@@ -91,8 +108,13 @@ class ShieldVpnService : VpnService() {
             override fun run() {
                 if (!wantRunning) return
                 if (!MihomoCore.running) {
-                    stopEngineOnly()
-                    startTunnel()
+                    tunnel.post {
+                        if (!wantRunning) return@post
+                        stopEngineOnly()
+                        try { startTunnel() } catch (t: Throwable) {
+                            noteFailure("watchdog restart crashed: ${t.message}")
+                        }
+                    }
                 }
                 watchdog.postDelayed(this, WATCHDOG_MS)
             }
@@ -104,12 +126,20 @@ class ShieldVpnService : VpnService() {
         if (token == null) marker.delete() else marker.writeText(token)
     }
 
+    private fun noteFailure(message: String) {
+        android.util.Log.e(TAG, "step=failed $message")
+        lastError = message
+        runCatching { File(filesDir, "engine_error.txt").writeText(message) }
+    }
+
     private fun startTunnel() {
-        // Drop any stale marker before the new tun exists, so a waiter cannot
-        // treat the previous session as ready.
+        if (!wantRunning) {
+            android.util.Log.i(TAG, "step=start-skipped")
+            return
+        }
+        android.util.Log.i(TAG, "step=load-config")
         markEngineReady(null)
-        // Switching lists: if already running, tear the engine down first and
-        // re-establish with the newly-activated profile's config.
+        runCatching { File(filesDir, "engine_error.txt").delete() }
         if (running) stopEngineOnly()
         val cfg = try {
             val active = RoutingConfig.load(this)
@@ -119,9 +149,22 @@ class ShieldVpnService : VpnService() {
                 com.privacyshield.proxy.core.EngineRoutes.merge(active, saved.map { it.config })
             )
         } catch (e: Exception) {
-            lastError = "Protected routing data could not be unlocked"
-            stopSelf()
+            noteFailure("Protected routing data could not be unlocked")
+            endService()
             return
+        }
+        android.util.Log.i(TAG, "step=config nodes=${cfg.nodes.size} clones=${cfg.bbMap.size} final=${cfg.finalTarget}")
+
+        android.util.Log.i(TAG, "step=${com.privacyshield.proxy.core.EngineStart.RESOLVE}")
+        val resolved = HashMap<String, String?>()
+        for (node in cfg.nodes) {
+            val host = node.server
+            resolved[host] = if (host.matches(Regex("^[0-9.]+$")) || host.contains(":")) {
+                host
+            } else {
+                runCatching { java.net.InetAddress.getByName(host).hostAddress }.getOrNull()
+            }
+            android.util.Log.i(TAG, "step=resolved $host -> ${resolved[host] ?: "unresolved"}")
         }
 
         val androidUser = com.privacyshield.proxy.core.AndroidProfile.current(this)
@@ -156,17 +199,19 @@ class ShieldVpnService : VpnService() {
             try { builder.addDisallowedApplication(container) } catch (_: Exception) {}
         }
 
+        android.util.Log.i(TAG, "step=${com.privacyshield.proxy.core.EngineStart.ESTABLISH}")
         val pfd = try {
             builder.establish()
         } catch (e: Exception) {
-            stopSelf(); return
+            noteFailure("establish threw ${e.javaClass.simpleName}: ${e.message}")
+            endService(); return
         }
         if (pfd == null) {
-            stopSelf(); return
+            noteFailure("establish returned null (VPN consent missing or revoked)")
+            endService(); return
         }
-        // One owner. Mihomo closes this fd on stop, which is what removes tun0.
-        // A Java dup kept the interface up whenever the native start did not adopt it.
         val tunFd = pfd.detachFd()
+        android.util.Log.i(TAG, "step=establish fd=$tunFd")
 
         // Mihomo home dir holds config.yaml + downloaded geo/provider files.
         val home = File(filesDir, "mihomo").apply { mkdirs() }
@@ -187,17 +232,7 @@ class ShieldVpnService : VpnService() {
         // (our app is excluded from the VPN), so Mihomo never needs in-tunnel DNS
         // to reach the proxy. Target domains are still resolved remotely by the
         // proxy via fake-ip.
-        val serverResolver: (String) -> String? = { host ->
-            if (host.matches(Regex("^[0-9.]+$")) || host.contains(":")) {
-                host // already an IP literal
-            } else {
-                try {
-                    java.net.InetAddress.getByName(host).hostAddress
-                } catch (_: Exception) {
-                    null
-                }
-            }
-        }
+        val serverResolver: (String) -> String? = { host -> resolved[host] }
         configFile.writeText(cfg.toClashYaml(
             tunFd, uidResolver, serverResolver,
             com.privacyshield.proxy.core.PrivateDns.strictHost(this)
@@ -236,16 +271,18 @@ class ShieldVpnService : VpnService() {
             })
         }
 
+        android.util.Log.i(TAG, "step=${com.privacyshield.proxy.core.EngineStart.MIHOMO}")
         val err = MihomoCore.start(home.absolutePath, configFile.absolutePath)
         // Mihomo has loaded the configuration; do not retain credentials in a plaintext file.
         runCatching { configFile.delete() }
         if (err.isNotEmpty()) {
-            lastError = err
+            noteFailure("mihomo: $err")
             runCatching { ParcelFileDescriptor.adoptFd(tunFd).close() }
             stopTunnel()
             return
         }
         running = true
+        android.util.Log.i(TAG, "step=mihomo-ok listeners=${cfg.bbMap.size}")
         val readyPort = cfg.nodes.firstOrNull { it.name == "emu" }?.port
             ?: cfg.nodes.firstOrNull { it.isValid() }?.port
         markEngineReady(readyPort?.toString() ?: "up")
@@ -261,11 +298,17 @@ class ShieldVpnService : VpnService() {
         markEngineReady(null)
     }
 
-    private fun stopTunnel() {
+    private fun endService() {
         watchdog.removeCallbacksAndMessages(null)
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
+
+    private fun stopTunnel() {
         stopEngineOnly()
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        endService()
     }
 
     override fun onDestroy() {
@@ -274,14 +317,14 @@ class ShieldVpnService : VpnService() {
         // The worker thread is process-wide and daemon; quitting it here dropped
         // a queued restart and left tun0 up.
         watchdog.removeCallbacksAndMessages(null)
-        stopEngineOnly()
+        tunnel.post { if (!wantRunning) stopEngineOnly() }
         super.onDestroy()
     }
 
     override fun onRevoke() {
-        // User revoked VPN consent (or another VPN took over) — stop for real.
+        android.util.Log.i(TAG, "step=revoke")
         wantRunning = false
-        stopTunnel()
+        tunnel.post { stopTunnel() }
         super.onRevoke()
     }
 

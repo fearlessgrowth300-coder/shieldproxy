@@ -50,8 +50,11 @@
                     android:text="Engine off" android:textColor="@color/shield_text"
                     android:textSize="17sp" android:textStyle="bold" />
             </LinearLayout>
-            <TextView android:layout_width="42dp" android:layout_height="42dp"
-                android:background="@drawable/bg_status_safe" android:gravity="center"
+            <TextView android:id="@+id/homeEngineMark"
+                android:layout_width="42dp" android:layout_height="42dp"
+                android:background="@drawable/bg_status_safe" android:clickable="true"
+                android:contentDescription="Start or stop the routing engine"
+                android:focusable="true" android:gravity="center"
                 android:text="✓" android:textColor="@color/shield_accent"
                 android:textSize="20sp" android:textStyle="bold" />
         </LinearLayout>

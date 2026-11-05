@@ -142,6 +142,16 @@ echo "startupSeconds=$ELAPSED" | tee -a "$OUT/result.txt"
 if [ "$ELAPSED" -gt 90 ]; then
   fail "startup took ${ELAPSED}s"
 fi
+adb logcat -d -s ShieldVpn:I GoLog:I > "$OUT/engine-log.txt" || true
+if ! grep -q "step=mihomo-ok" "$OUT/engine-log.txt" && ! grep -q "Initial configuration complete" "$OUT/engine-log.txt"; then
+  fail "engine core did not start"
+fi
+LP=$(adb shell run-as com.privacyshield.proxy cat files/clone_listener_port.txt | tr -d '\r')
+adb forward tcp:"$LP" tcp:"$LP" >/dev/null || fail "could not forward listener $LP"
+if ! python3 -c "import socket; s=socket.create_connection(('127.0.0.1', int('$LP')), 5); s.close()"; then
+  fail "clone listener $LP did not accept a connection"
+fi
+echo "listener=$LP" | tee -a "$OUT/result.txt"
 probe "$OUT/socks-a.log"
 
 echo "toggle" | tee -a "$OUT/result.txt"

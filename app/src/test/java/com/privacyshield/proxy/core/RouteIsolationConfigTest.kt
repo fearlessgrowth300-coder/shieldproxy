@@ -84,6 +84,28 @@ class RouteIsolationConfigTest {
     }
 
     @Test
+    fun engineStartOrderReachesTheCoreBeforeTheListener() {
+        assertEquals(
+            listOf(
+                EngineStart.FOREGROUND,
+                EngineStart.RESOLVE,
+                EngineStart.ESTABLISH,
+                EngineStart.MIHOMO
+            ),
+            EngineStart.STEPS
+        )
+        val cfg = RoutingConfig()
+        cfg.nodes.add(node("emu", server = "10.0.2.2"))
+        cfg.bbMap[tag(1, "com.android.chrome")] = "emu"
+        cfg.finalTarget = "emu"
+        val yaml = cfg.toClashYaml()
+        val port = CloneListeners.portFor(authority, 1, "com.android.chrome")
+        assertTrue(yaml.contains("name: \"bbp$port\""))
+        assertTrue(yaml.contains("listen: 127.0.0.1"))
+        assertTrue(yaml.contains("port: $port"))
+    }
+
+    @Test
     fun listenerPortsStayPutWhenAnotherCloneIsAdded() {
         val first = tag(1, "com.instagram.android")
         val before = CloneListeners.assignPorts(listOf(first))

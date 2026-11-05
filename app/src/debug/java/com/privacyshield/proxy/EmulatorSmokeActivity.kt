@@ -6,6 +6,7 @@ import android.net.VpnService
 import android.os.Bundle
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
+import com.privacyshield.proxy.core.CloneListeners
 import com.privacyshield.proxy.core.ProxyNode
 import com.privacyshield.proxy.core.RoutingConfig
 import com.privacyshield.proxy.core.VaultKeyStore
@@ -56,11 +57,15 @@ class EmulatorSmokeActivity : Activity() {
     private fun writeRoute(port: Int) {
         val cfg = RoutingConfig().apply {
             nodes.add(ProxyNode(name = "emu", type = "socks5", server = "10.0.2.2", port = port, udp = true))
+            appMap["com.privacyshield.proxy.probe"] = "emu"
+            bbMap[CloneListeners.tag("emu.bridge", 1, "com.android.chrome")] = "emu"
             finalTarget = "emu"
             geoAutoUpdate = false
             geodataMode = false
             ipv6 = false
         }
         cfg.save(this)
+        val listener = CloneListeners.portFor("emu.bridge", 1, "com.android.chrome")
+        File(filesDir, "clone_listener_port.txt").writeText(listener.toString())
     }
 }
