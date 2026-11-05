@@ -166,15 +166,11 @@ class ShieldVpnService : VpnService() {
         } catch (_: Exception) {
         }
 
-        // Clone routes are enforced inside this tunnel. The hook dials 127.0.0.1:<port>, which
-        // never enters the TUN. Everything else from the container UID is captured and rejected
-        // by the UID rule, so a missed socket cannot use the phone network.
-        // When no clone route is configured, leave the containers excluded so Blackbox's own
-        // UI traffic is not rewritten by fake-ip.
-        if (cfg.bbMap.isEmpty()) {
-            for (container in com.privacyshield.proxy.core.CloneListeners.CONTAINER_PACKAGES) {
-                try { builder.addDisallowedApplication(container) } catch (_: Exception) {}
-            }
+        // The hook dials 127.0.0.1:<port>, which never enters the TUN. The container
+        // itself stays outside the VPN so its DNS (including strict Private DNS) is
+        // not rewritten by fake-ip. Capturing it broke every in-clone exit check.
+        for (container in com.privacyshield.proxy.core.CloneListeners.packagesExcludedFromVpn()) {
+            try { builder.addDisallowedApplication(container) } catch (_: Exception) {}
         }
 
         val pfd = try {

@@ -12,7 +12,7 @@ For every saved clone tag `bb:<authority>:<userId>:<package>` the running Mihomo
 - `tls` and `udp` from the node. When `tls` is true, Mihomo speaks SOCKS-over-TLS or HTTPS to the upstream. The hook does not do that itself.
 - `countryIso`, `city`, `region`, `latitude`, `longitude`, `timezoneId`, and `locale`. `locale` is derived from the exit country (for example `fr-FR`), not from the phone.
 
-While any clone route is configured, the Blackbox container packages are inside the VPN. Their UID is `REJECT-DROP` for anything that arrives on the TUN.
+The Blackbox container packages stay outside the VPN (`addDisallowedApplication`), including while clone routes are configured. Putting them inside the tunnel rewrote their DNS. With strict Private DNS that surfaces as `PRIVATE_DNS_BROKEN` and every in-clone exit check fails. A `REJECT-DROP` UID rule is still emitted for any container packet that does reach the TUN.
 
 Loopback to `127.0.0.1` does not enter the TUN. That is the only path that reaches the assigned upstream.
 

@@ -22,6 +22,30 @@ object CloneListeners {
         "io.prismhub.clone"
     )
 
+    /**
+     * Always keep these packages out of the VPN, including when clone routes exist.
+     *
+     * Commit 296d25b captured them whenever a clone route was saved so a missed hook
+     * could be UID-rejected inside the tunnel. That also captured their DNS. Strict
+     * Private DNS (Android 9+) then failed over the VPN (`PRIVATE_DNS_BROKEN`) and
+     * every in-clone exit check died before it reached the proxy. Loopback to the
+     * per-clone listener does not need the container to be inside the TUN.
+     * The exit check still refuses to open the app unless the guest's observed IP
+     * is the proxy's, which is the fail-closed path for a hook that misses.
+     */
+    fun packagesExcludedFromVpn(): List<String> = CONTAINER_PACKAGES
+
+    /**
+     * Strict Private DNS (Android 9+ hostname mode) does its lookups as DNS-over-TLS.
+     * Once the container is inside this VPN, that check is marked PRIVATE_DNS_BROKEN
+     * and the guest cannot resolve the exit-check hosts. Outside the VPN, the same
+     * strict resolver keeps working, and the hook still dials 127.0.0.1.
+     */
+    fun inCloneExitCheckCanResolve(containerCapturedByVpn: Boolean, privateDnsStrict: Boolean): Boolean {
+        if (containerCapturedByVpn && privateDnsStrict) return false
+        return true
+    }
+
     const val PORT_BASE = 20000
     const val PORT_SPAN = 8000
 

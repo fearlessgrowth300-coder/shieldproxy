@@ -28,6 +28,29 @@ class RouteIsolationConfigTest {
     }
 
     @Test
+    fun strictPrivateDnsKeepsCloneContainersOutOfTheVpn() {
+        // 296d25b started capturing these packages whenever bbMap was set. Strict
+        // Private DNS (hostname mode, Android 9+) then failed inside the VPN and
+        // the guest's exit check could not resolve its endpoints.
+        val cfg = RoutingConfig()
+        cfg.nodes.add(node("London", tls = true))
+        cfg.bbMap[tag(18, "com.instagram.android")] = "London"
+        assertFalse(cfg.bbMap.isEmpty())
+        val excluded = CloneListeners.packagesExcludedFromVpn()
+        assertEquals(CloneListeners.CONTAINER_PACKAGES, excluded)
+        assertTrue(excluded.contains("top.niunaijun.blackbox"))
+        assertTrue(excluded.contains("io.prismhub.clone"))
+        assertTrue(excluded.contains("com.novspace.box"))
+        assertTrue(excluded.contains("app.cloudvault.multi"))
+        val captured = !excluded.contains("io.prismhub.clone")
+        assertFalse(captured)
+        assertTrue(CloneListeners.inCloneExitCheckCanResolve(captured, privateDnsStrict = true))
+        assertFalse(CloneListeners.inCloneExitCheckCanResolve(
+            containerCapturedByVpn = true, privateDnsStrict = true
+        ))
+    }
+
+    @Test
     fun listenerPortsStayPutWhenAnotherCloneIsAdded() {
         val first = tag(1, "com.instagram.android")
         val before = CloneListeners.assignPorts(listOf(first))

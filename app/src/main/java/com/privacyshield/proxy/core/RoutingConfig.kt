@@ -25,8 +25,9 @@ data class RoutingConfig(
     /**
      * BlackBox clone routes: tag "bb:<authority>:<userId>:<pkg>" -> node name.
      * Each tag is emitted as its own loopback SOCKS listener (see [CloneListeners]) because
-     * every clone in a container shares one Android UID. The container is no longer excluded
-     * from the VPN while any clone route exists; packets that miss the listener are rejected.
+     * every clone in a container shares one Android UID. The container stays outside the
+     * VPN so strict Private DNS is not broken by the tunnel. A missed hook is fail-closed
+     * by the in-clone exit check, which will not open the app on the phone's real IP.
      */
     val bbMap: LinkedHashMap<String, String> = LinkedHashMap(),
     val rules: MutableList<Rule> = mutableListOf(),
