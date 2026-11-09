@@ -100,18 +100,26 @@ object AssignmentRules {
     }
 
     /**
-     * Two clone routes whose proxies share a server+username or a provider `package-<id>`.
-     * The same node on one shared-GMS user is allowed, because that user must share one exit.
+     * Two clone routes that would exit on the same upstream session.
+     *
+     * The same SOAX package with different `sessionid-` values is not shared: those
+     * are different sticky exits. A pair is reported only when [involvedTags] is null
+     * or at least one side is in that set, so a pre-existing pair does not block an
+     * unrelated save. The same node on one shared-GMS user is allowed.
      */
     internal fun sharedUpstreamViolations(
         assignments: List<Pair<Tag, ProxyNode>>,
-        sharedGmsUsers: Set<String> = emptySet()
+        sharedGmsUsers: Set<String> = emptySet(),
+        involvedTags: Set<String>? = null
     ): List<String> {
         val out = ArrayList<String>()
         for (i in assignments.indices) {
             for (j in i + 1 until assignments.size) {
                 val (left, leftNode) = assignments[i]
                 val (right, rightNode) = assignments[j]
+                if (involvedTags != null && left.raw !in involvedTags && right.raw !in involvedTags) {
+                    continue
+                }
                 if (!sharesUpstream(leftNode, rightNode)) continue
                 val allowed = left.user == right.user &&
                     left.user in sharedGmsUsers &&
@@ -125,13 +133,17 @@ object AssignmentRules {
     }
 
     internal fun sharesUpstream(left: ProxyNode, right: ProxyNode): Boolean {
-        if (left.name == right.name && left.name.isNotBlank()) return true
+        if (left.name.isNotBlank() && left.name == right.name) return true
         val sameServer = left.server.equals(right.server, ignoreCase = true) && left.port == right.port
-        val sameUser = left.username.isNotBlank() && left.username == right.username
-        if (sameServer && sameUser) return true
+        val sameFullUsername = left.username.isNotBlank() && left.username == right.username
+        if (sameServer && sameFullUsername) return true
         val leftPackage = left.providerPackageId()
         val rightPackage = right.providerPackageId()
-        return leftPackage != null && leftPackage == rightPackage
+        if (leftPackage == null || leftPackage != rightPackage) return false
+        val leftSession = left.sessionId()
+        val rightSession = right.sessionId()
+        if (leftSession == null && rightSession == null) return true
+        return leftSession != null && leftSession == rightSession
     }
 
     // 3. GMS proxy consistency ---------------------------------------------------

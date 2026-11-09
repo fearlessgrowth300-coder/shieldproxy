@@ -67,33 +67,60 @@ class RouteIsolationConfigTest {
     }
 
     @Test
-    fun sharedServerUsernameOrPackageIdIsRejected() {
-        val left = AssignmentRules.parse(tag(1, "com.instagram.android"))!!
-        val right = AssignmentRules.parse(tag(2, "com.whatsapp"))!!
+    fun samePackageWithDifferentSessionIdsIsAllowed() {
+        val left = AssignmentRules.parse(tag(0, "com.instagram.android"))!!
+        val right = AssignmentRules.parse(tag(4, "com.instagram.android"))!!
         val violations = AssignmentRules.sharedUpstreamViolations(
             listOf(
                 left to node("A", user = "package-349957-sessionid-aaa"),
                 right to node("B", user = "package-349957-sessionid-bbb", server = "other.example")
             )
         )
-        assertEquals(1, violations.size)
+        assertTrue(violations.isEmpty())
+    }
 
-        val sameSession = AssignmentRules.sharedUpstreamViolations(
+    @Test
+    fun samePackageWithTheSameSessionIdIsBlocked() {
+        val left = AssignmentRules.parse(tag(0, "com.instagram.android"))!!
+        val right = AssignmentRules.parse(tag(4, "com.whatsapp"))!!
+        val violations = AssignmentRules.sharedUpstreamViolations(
             listOf(
-                left to node("A", user = "package-1-sessionid-aaa"),
-                right to node("C", user = "alice", server = "gw.example", port = 1080)
-                    .copy(username = "alice")
+                left to node("A", user = "package-349957-sessionid-aaa", server = "a.example"),
+                right to node("B", user = "package-349957-sessionid-aaa", server = "b.example")
             )
         )
-        assertTrue(sameSession.isEmpty())
+        assertEquals(1, violations.size)
+    }
 
-        val sameGateway = AssignmentRules.sharedUpstreamViolations(
+    @Test
+    fun sameServerPortAndFullUsernameIsBlocked() {
+        val left = AssignmentRules.parse(tag(1, "com.instagram.android"))!!
+        val right = AssignmentRules.parse(tag(2, "com.whatsapp"))!!
+        val violations = AssignmentRules.sharedUpstreamViolations(
             listOf(
                 left to node("A", user = "alice"),
                 right to node("B", user = "alice")
             )
         )
-        assertEquals(1, sameGateway.size)
+        assertEquals(1, violations.size)
+    }
+
+    @Test
+    fun preExistingSharedSessionDoesNotBlockAnUnrelatedRoute() {
+        val oldLeft = AssignmentRules.parse(tag(0, "com.instagram.android"))!!
+        val oldRight = AssignmentRules.parse(tag(4, "com.instagram.android"))!!
+        val fresh = AssignmentRules.parse(tag(21, "com.instagram.android"))!!
+        val savedPair = listOf(
+            oldLeft to node("A", user = "package-349957-sessionid-same", server = "a.example"),
+            oldRight to node("B", user = "package-349957-sessionid-same", server = "b.example"),
+            fresh to node("C", user = "package-349957-sessionid-new")
+        )
+        val blocking = AssignmentRules.sharedUpstreamViolations(
+            savedPair, involvedTags = setOf(fresh.raw)
+        )
+        assertTrue(blocking.isEmpty())
+        val allPairs = AssignmentRules.sharedUpstreamViolations(savedPair)
+        assertEquals(1, allPairs.size)
     }
 
     @Test

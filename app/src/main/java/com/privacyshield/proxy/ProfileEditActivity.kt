@@ -284,9 +284,9 @@ class ProfileEditActivity : AppCompatActivity() {
                 .append(gms.sumOf { it.nodes.size }).append(" different proxies.\n\n")
         }
         if (upstream.isNotEmpty()) {
-            msg.append("⚠ These routes share a proxy server, username, or provider package id:\n")
+            msg.append("⚠ These routes share the same proxy session:\n")
             upstream.forEach { msg.append(" • ").append(it).append("\n") }
-            msg.append("\nEach route needs its own provider session. Shared-GMS clones on one user may keep a single node.\n\n")
+            msg.append("\nEach of those routes needs its own session. A shared provider package with a different session id is allowed.\n\n")
         }
         val hardBlock = coloc.isNotEmpty() || gms.isNotEmpty() || upstream.isNotEmpty()
         val b = AlertDialog.Builder(this)
@@ -326,7 +326,9 @@ class ProfileEditActivity : AppCompatActivity() {
         val sharedUsers = assignments.map { it.first.user }.filter { user ->
             assignments.any { it.first.user == user && com.privacyshield.proxy.core.GmsShareStore.isEnabled(this, it.first.raw) }
         }.toSet()
-        return com.privacyshield.proxy.core.AssignmentRules.sharedUpstreamViolations(assignments, sharedUsers)
+        return com.privacyshield.proxy.core.AssignmentRules.sharedUpstreamViolations(
+            assignments, sharedUsers, intendedBb.keys
+        )
     }
 
     /** Build, validate, apply, then persist. A rejected clone never becomes a saved claim. */

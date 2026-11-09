@@ -199,8 +199,9 @@ class ProxyEditActivity : AppCompatActivity() {
                 it.first.user == user && com.privacyshield.proxy.core.GmsShareStore.isEnabled(this, it.first.raw)
             }
         }.toSet()
-        return com.privacyshield.proxy.core.AssignmentRules.sharedUpstreamViolations(assignments, shared)
-            .firstOrNull()?.let { "These routes share a server, username, or provider package id: $it" }
+        return com.privacyshield.proxy.core.AssignmentRules.sharedUpstreamViolations(
+            assignments, shared, setOf(tag)
+        ).firstOrNull()?.let { "These routes share the same proxy session: $it" }
     }
 
     private fun save() {
