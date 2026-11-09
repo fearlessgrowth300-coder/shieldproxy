@@ -189,14 +189,30 @@ adb shell am start -n com.privacyshield.proxy/.EngineMarkActivity
 wait_file com.privacyshield.proxy header_ready.txt || fail "engine button did not bind"
 tap_try=0
 TAP=""
-while [ "$tap_try" -lt 3 ]; do
+while [ "$tap_try" -lt 5 ]; do
   adb_do adb shell uiautomator dump /sdcard/uidump.xml || fail "could not dump the engine button"
   adb pull /sdcard/uidump.xml "$OUT/uidump.xml" || fail "could not pull the engine button dump"
   if TAP=$(python3 "$ROOT/tools/tap_mark.py" "$OUT/uidump.xml" 2>"$OUT/tap_mark.txt"); then
     break
   fi
-  # A system ANR dialog (for example Pixel Launcher) can cover the activity.
-  adb shell input keyevent 4 >/dev/null 2>&1 || true
+  CENTER=$(python3 -c '
+import re, sys
+xml = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+for m in re.finditer(r"<node\b[^>]*>", xml):
+    tag = m.group(0)
+    if "aerr_close" not in tag:
+        continue
+    b = re.search(r"bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"", tag)
+    if b:
+        x1, y1, x2, y2 = (int(v) for v in b.groups())
+        print(f"{(x1 + x2) // 2} {(y1 + y2) // 2}")
+        break
+' "$OUT/uidump.xml" 2>/dev/null || true)
+  if [ -n "$CENTER" ]; then
+    adb shell input tap $CENTER >/dev/null 2>&1 || true
+  else
+    adb shell input keyevent 4 >/dev/null 2>&1 || true
+  fi
   adb shell am start -n com.privacyshield.proxy/.EngineMarkActivity >/dev/null 2>&1 || true
   tap_try=$((tap_try + 1))
   sleep 1

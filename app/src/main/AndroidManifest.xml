@@ -12,6 +12,7 @@
     <uses-permission android:name="io.prismhub.clone.permission.BRIDGE" />
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Needed to resolve mapped app packages to their UID for per-app routing rules. -->
     <uses-permission
         android:name="android.permission.QUERY_ALL_PACKAGES"

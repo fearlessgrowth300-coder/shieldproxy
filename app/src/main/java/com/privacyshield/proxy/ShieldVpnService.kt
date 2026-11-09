@@ -151,12 +151,14 @@ class ShieldVpnService : VpnService() {
         )
     }
 
-    private fun ownVpnVisible(): Boolean {
+    private fun ownVpnVisible(): Boolean = try {
         val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return false
-        return cm.allNetworks.any { network ->
+        cm.allNetworks.any { network ->
             cm.getNetworkCapabilities(network)
                 ?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
         }
+    } catch (_: SecurityException) {
+        false
     }
 
     private fun loadPhoneConfig(): com.privacyshield.proxy.core.RoutingConfig {
