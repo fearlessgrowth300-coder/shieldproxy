@@ -54,6 +54,11 @@ data class RoutingConfig(
     fun isRunnable(): Boolean =
         nodes.any { it.isValid() } || finalTarget == "DIRECT"
 
+    /** True when nothing in this config routes the phone's own apps. */
+    fun routesOnlyClones(): Boolean =
+        bbMap.isNotEmpty() && appMap.isEmpty() && finalTarget == "DIRECT" &&
+            rules.isEmpty() && rawRules.isEmpty()
+
     /** Every package that must be captured by the VPN (per-app allow-list). */
     fun routedPackages(): Set<String> =
         appMap.keys.filter { it.contains(".") }.toSet()

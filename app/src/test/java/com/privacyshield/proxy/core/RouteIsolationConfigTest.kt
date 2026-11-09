@@ -28,6 +28,16 @@ class RouteIsolationConfigTest {
     }
 
     @Test
+    fun onlyPureCloneListsLeaveThePhonesOwnAppsOutOfTheTunnel() {
+        val clones = RoutingConfig()
+        assertFalse(clones.routesOnlyClones())
+        clones.bbMap[tag(3, "com.instagram.android")] = "London"
+        assertTrue(clones.routesOnlyClones())
+        clones.appMap["com.android.chrome"] = "London"
+        assertFalse(clones.routesOnlyClones())
+    }
+
+    @Test
     fun onlyNonTlsProxiesAreDialedByResolvedIp() {
         val cfg = RoutingConfig()
         cfg.nodes.add(node("Secure", tls = true))

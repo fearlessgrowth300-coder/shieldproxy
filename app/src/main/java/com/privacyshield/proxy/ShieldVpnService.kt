@@ -178,21 +178,32 @@ class ShieldVpnService : VpnService() {
             builder.setBlocking(false)
         }
 
-        // addDisallowedApplication is resolved in this Android user only. The other
-        // profile's copy of a package has a different UID and is not affected.
-        try {
-            builder.addDisallowedApplication(packageName)
-        } catch (_: Exception) {
-        }
+        val containers = com.privacyshield.proxy.core.CloneListeners.CONTAINER_PACKAGES
+        // A clone-only list has nothing to do with the phone's own apps, so only the containers
+        // enter the tunnel. Android rejects mixing allowed and disallowed apps on one builder.
+        val capturedContainers = if (cfg.routesOnlyClones()) {
+            containers.count { container ->
+                try { builder.addAllowedApplication(container); true } catch (_: Exception) { false }
+            }
+        } else 0
 
-        // Clone routes are enforced inside this tunnel. The hook dials 127.0.0.1:<port>, which
-        // never enters the TUN. Everything else from the container UID is captured and rejected
-        // by the UID rule, so a missed socket cannot use the phone network.
-        // When no clone route is configured, leave the containers excluded so Blackbox's own
-        // UI traffic is not rewritten by fake-ip.
-        if (cfg.bbMap.isEmpty()) {
-            for (container in com.privacyshield.proxy.core.CloneListeners.CONTAINER_PACKAGES) {
-                try { builder.addDisallowedApplication(container) } catch (_: Exception) {}
+        if (capturedContainers == 0) {
+            // addDisallowedApplication is resolved in this Android user only. The other
+            // profile's copy of a package has a different UID and is not affected.
+            try {
+                builder.addDisallowedApplication(packageName)
+            } catch (_: Exception) {
+            }
+
+            // Clone routes are enforced inside this tunnel. The hook dials 127.0.0.1:<port>, which
+            // never enters the TUN. Everything else from the container UID is captured and rejected
+            // by the UID rule, so a missed socket cannot use the phone network.
+            // When no clone route is configured, leave the containers excluded so Blackbox's own
+            // UI traffic is not rewritten by fake-ip.
+            if (cfg.bbMap.isEmpty()) {
+                for (container in containers) {
+                    try { builder.addDisallowedApplication(container) } catch (_: Exception) {}
+                }
             }
         }
 
