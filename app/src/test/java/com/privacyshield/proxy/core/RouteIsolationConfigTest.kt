@@ -28,6 +28,15 @@ class RouteIsolationConfigTest {
     }
 
     @Test
+    fun onlyNonTlsProxiesAreDialedByResolvedIp() {
+        val cfg = RoutingConfig()
+        cfg.nodes.add(node("Secure", tls = true))
+        cfg.nodes.add(node("Plain"))
+        val yaml = cfg.toClashYaml(serverResolver = { "198.51.100.7" })
+        assertEquals(1, Regex("server: 198\.51\.100\.7").findAll(yaml).count())
+    }
+
+    @Test
     fun listenerPortsStayPutWhenAnotherCloneIsAdded() {
         val first = tag(1, "com.instagram.android")
         val before = CloneListeners.assignPorts(listOf(first))

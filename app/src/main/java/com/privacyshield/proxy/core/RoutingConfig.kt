@@ -151,7 +151,8 @@ data class RoutingConfig(
         if (valid.isEmpty()) {
             sb.append("  []\n")
         } else {
-            for (n in valid) sb.append(n.toClashYaml(serverOverride = serverResolver?.invoke(n.server)))
+            // A TLS proxy's certificate names its host, so it can never validate against a bare IP.
+            for (n in valid) sb.append(n.toClashYaml(serverOverride = if (n.tls) null else serverResolver?.invoke(n.server)))
         }
 
         // A selector group holding every node (+ DIRECT) for manual/UI selection.
