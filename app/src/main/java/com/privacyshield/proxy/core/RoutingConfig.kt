@@ -23,10 +23,11 @@ data class RoutingConfig(
     /** package/process name -> node name (or DIRECT / REJECT). Deterministic. */
     val appMap: LinkedHashMap<String, String> = LinkedHashMap(),
     /**
-     * BlackBox clone routes: tag "bb:<authority>:<userId>:<pkg>" -> node name. These do NOT go
-     * through this VPN (clones share one UID) — they're pushed into the container via its bridge.
-     * Kept in the saved profile so the UI can show them and re-apply them, but never emitted to
-     * the Mihomo config.
+     * BlackBox clone routes: tag "bb:<authority>:<userId>:<pkg>" -> node name.
+     * Each tag is emitted as its own loopback SOCKS listener (see [CloneListeners]) because
+     * every clone in a container shares one Android UID. The container stays outside the
+     * VPN so strict Private DNS is not broken by the tunnel. A missed hook is fail-closed
+     * by the in-clone exit check, which will not open the app on the phone's real IP.
      */
     val bbMap: LinkedHashMap<String, String> = LinkedHashMap(),
     val rules: MutableList<Rule> = mutableListOf(),
@@ -79,7 +80,8 @@ data class RoutingConfig(
     fun toClashYaml(
         tunFd: Int? = null,
         uidOf: ((String) -> Int?)? = null,
-        serverResolver: ((String) -> String?)? = null
+        serverResolver: ((String) -> String?)? = null,
+        privateDnsHost: String? = null
     ): String {
         val sb = StringBuilder()
         sb.append("mixed-port: 7890\n")
@@ -119,6 +121,15 @@ data class RoutingConfig(
         sb.append("  ipv6: ").append(ipv6).append("\n")
         sb.append("  enhanced-mode: fake-ip\n")
         sb.append("  fake-ip-range: 198.18.0.1/16\n")
+        val privateDns = privateDnsHost?.trim()?.takeIf { it.isNotEmpty() }
+        if (privateDns != null) {
+            // Strict Private DNS (Android 9+) connects to this name on port 853.
+            // A fake-ip here makes that handshake fail and Android marks the VPN
+            // PRIVATE_DNS_BROKEN, which drops DNS for the whole phone.
+            sb.append("  fake-ip-filter:\n")
+            sb.append("    - ").append(ProxyNode.quote(privateDns)).append("\n")
+            sb.append("    - ").append(ProxyNode.quote("+.$privateDns")).append("\n")
+        }
         // Route target DNS transport by the same rules as the app connection. In whole-phone
         // mode this sends DoH through the selected proxy instead of asking a resolver directly
         // from the phone's real network. Proxy-host bootstrap remains explicitly separate below.
@@ -162,6 +173,9 @@ data class RoutingConfig(
         for (n in valid) sb.append("      - ").append(ProxyNode.quote(n.name)).append("\n")
         sb.append("      - DIRECT\n")
 
+        // Per-clone SOCKS inbounds. `proxy:` pins the inbound to that node before rule matching.
+        CloneListeners.appendListeners(sb, bbMap) { name -> nodeByName(name) != null }
+
         // Rule providers
         if (providers.isNotEmpty()) {
             sb.append("rule-providers:\n")
@@ -171,9 +185,16 @@ data class RoutingConfig(
         // Rules: per-app map first (highest priority, deterministic), then
         // user rules, then the final catch-all.
         sb.append("rules:\n")
+        // Strict Private DNS is DNS-over-TLS on 853. Let it reach the resolver the
+        // user chose, on the underlying network, before any reject rule. Otherwise
+        // turning this VPN on blackholes every lookup on the phone.
+        if (!privateDns.isNullOrBlank()) {
+            sb.append("  - AND,((NETWORK,tcp),(DST-PORT,853)),DIRECT\n")
+            sb.append("  - AND,((NETWORK,udp),(DST-PORT,853)),DIRECT\n")
+        }
         // (A) LEAK GUARDS — evaluated before any app route, so nothing slips past them.
-        // These harden the phone-app (VpnService) path; container clones are enforced
-        // separately in the BlackBox bridge.
+        // Clone listeners are pinned with `proxy:` and also named here. Container UID
+        // traffic that reached the TUN (the hook missed its port) is rejected.
         //
         // IPv6 kill: when IPv6 is off, drop every IPv6 destination. Otherwise a dual-stack
         // app could reach the internet over v6 around the (v4) tunnel and expose the real IP.
@@ -186,6 +207,7 @@ data class RoutingConfig(
         if (blockQuic) {
             sb.append("  - AND,((NETWORK,udp),(DST-PORT,443)),REJECT-DROP\n")
         }
+        CloneListeners.appendRules(sb, bbMap, uidOf)
         // Per-app UDP guard: any app routed to a proxy that CAN'T carry UDP must not emit UDP
         // at all, or it would fail (or leak). Block that app's UDP before its route rule.
         for ((pkg, node) in appMap) {

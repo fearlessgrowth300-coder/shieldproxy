@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.Spinner
 import android.widget.TextView
@@ -35,6 +36,7 @@ class ProxyEditActivity : AppCompatActivity() {
     private lateinit var user: EditText
     private lateinit var pass: EditText
     private lateinit var type: Spinner
+    private lateinit var tls: CheckBox
     private lateinit var status: TextView
 
     // set when a share-link is imported (carries protocol-specific keys)
@@ -56,6 +58,7 @@ class ProxyEditActivity : AppCompatActivity() {
         user = findViewById(R.id.pxUser)
         pass = findViewById(R.id.pxPass)
         type = findViewById(R.id.pxType)
+        tls = findViewById(R.id.pxTls)
         status = findViewById(R.id.pxStatus)
         type.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, TYPES)
 
@@ -83,6 +86,7 @@ class ProxyEditActivity : AppCompatActivity() {
         port.setText(n.port.toString())
         user.setText(n.username)
         pass.setText(n.password)
+        tls.isChecked = n.tls
         if (n.type == "socks5" || n.type == "http") {
             type.setSelection(TYPES.indexOf(n.type).coerceAtLeast(0))
         } else {
@@ -135,14 +139,15 @@ class ProxyEditActivity : AppCompatActivity() {
 
     private fun currentNode(): ProxyNode {
         val nm = name.text.toString().trim().ifBlank { "Proxy" }
-        imported?.let { return it.copy(name = nm) }
+        imported?.let { return it.copy(name = nm, tls = tls.isChecked) }
         return ProxyNode(
             name = nm,
             type = TYPES[type.selectedItemPosition],
             server = host.text.toString().trim(),
             port = port.text.toString().toIntOrNull() ?: 0,
             username = user.text.toString().trim(),
-            password = pass.text.toString()
+            password = pass.text.toString(),
+            tls = tls.isChecked
         )
     }
 
@@ -170,6 +175,32 @@ class ProxyEditActivity : AppCompatActivity() {
                 }
             }
         }.start()
+    }
+
+    private fun upstreamCollision(
+        node: com.privacyshield.proxy.core.ProxyNode,
+        item: com.privacyshield.proxy.core.BbClone
+    ): String? {
+        val tag = com.privacyshield.proxy.core.CloneListeners.tag(item.authority, item.userId, item.pkg)
+        val assignments = ArrayList<Pair<com.privacyshield.proxy.core.AssignmentRules.Tag, com.privacyshield.proxy.core.ProxyNode>>()
+        for (profile in com.privacyshield.proxy.core.ProfileStore.load(this)) {
+            for ((existing, name) in profile.config.bbMap) {
+                if (existing == tag) continue
+                val parsed = com.privacyshield.proxy.core.AssignmentRules.parse(existing) ?: continue
+                val other = profile.config.nodes.firstOrNull { it.name == name } ?: continue
+                assignments.add(parsed to other)
+            }
+        }
+        val self = com.privacyshield.proxy.core.AssignmentRules.parse(tag) ?: return null
+        assignments.add(self to node)
+        com.privacyshield.proxy.core.GmsShareStore.migrate(this, assignments.map { it.first.raw })
+        val shared = assignments.map { it.first.user }.filter { user ->
+            assignments.any {
+                it.first.user == user && com.privacyshield.proxy.core.GmsShareStore.isEnabled(this, it.first.raw)
+            }
+        }.toSet()
+        return com.privacyshield.proxy.core.AssignmentRules.sharedUpstreamViolations(assignments, shared)
+            .firstOrNull()?.let { "These routes share a server, username, or provider package id: $it" }
     }
 
     private fun save() {
@@ -218,25 +249,35 @@ class ProxyEditActivity : AppCompatActivity() {
             .setTitle("Route which app through '${node.name}'?")
             .setItems(labels) { _, which ->
                 val item = items[which]
-                val extras = android.os.Bundle().apply {
-                    putInt("userId", item.userId)
-                    putString("pkg", item.pkg)   // per-app proxy so apps in the same User don't collide
-                    putString("type", node.type)
-                    putString("server", node.server)
-                    putInt("port", node.port)
-                    putString("username", node.username)
-                    putString("password", node.password)
-                }
-                val res = try {
-                    contentResolver.call(com.privacyshield.proxy.core.BlackBoxBridge.baseFor(item.authority), "setProxy", null, extras)
-                } catch (e: Exception) { null }
-                if (res?.getBoolean("ok") == true) {
-                    ProxyLibrary.upsert(this, SavedProxy(node, lastIp, lastCity)) // remember it too
-                    val v = com.privacyshield.proxy.core.BlackBoxBridge.variantName(item.authority)
-                    status.text = "✓ '${item.label}' ($v User ${item.userId}) → ${node.name}. Reopen that app to apply."
-                } else {
-                    status.text = "✗ Failed to assign (${res?.getString("err") ?: "no response"})"
-                }
+                status.text = "Checking geography and whether this proxy is already used…"
+                Thread {
+                    val collision = upstreamCollision(node, item)
+                    if (collision != null) {
+                        runOnUiThread { status.text = "✗ Not assigned. $collision" }
+                        return@Thread
+                    }
+                    val tested = ProxyTester.test(node, lookupMetadata = true)
+                    if (!tested.geoVerified) {
+                        runOnUiThread {
+                            status.text = "✗ Exit country, timezone, and coordinates could not be verified. Nothing was assigned."
+                        }
+                        return@Thread
+                    }
+                    val geo = com.privacyshield.proxy.core.RouteGeo.fromTest(tested, node.countryIsoHint())
+                    val res = com.privacyshield.proxy.core.BlackBoxBridge.setCloneProxy(
+                        this, item.authority, item.userId, item.pkg, node, geo = geo
+                    )
+                    runOnUiThread {
+                        if (res.ok) {
+                            ProxyLibrary.upsert(this, SavedProxy(node, tested.ip, tested.city))
+                            val v = com.privacyshield.proxy.core.BlackBoxBridge.variantName(item.authority)
+                            status.text = "✓ '${item.label}' ($v User ${item.userId}) → ${node.name}" +
+                                " via 127.0.0.1:${com.privacyshield.proxy.core.CloneListeners.portFor(item.authority, item.userId, item.pkg)}. Reopen that app to apply."
+                        } else {
+                            status.text = "✗ Failed to assign (${res.error.ifBlank { "no response" }})"
+                        }
+                    }
+                }.start()
             }
             .setNegativeButton("Cancel", null)
             .show()

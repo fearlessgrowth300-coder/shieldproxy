@@ -42,7 +42,7 @@ object ProxyTester {
     private data class CachedMetadata(val metadata: Metadata, val storedAtMs: Long)
     private val geoCache = ConcurrentHashMap<String, CachedMetadata>()
 
-    fun test(node: ProxyNode, lookupMetadata: Boolean = true): Result {
+    fun test(node: ProxyNode, lookupMetadata: Boolean = true, timeoutMs: Int = TIMEOUT_MS): Result {
         if (!node.isValid()) return Result(false, error = "invalid proxy")
         // Only SOCKS5/HTTP proxies are raw TCP tunnels we can exit-IP test
         // directly. For engine-only protocols (ss/vless/hysteria2/tuic/vmess/
@@ -52,7 +52,7 @@ object ProxyTester {
         val rawTunnel = t == "socks5" || t == "socks" || t.startsWith("http")
         if (!rawTunnel) {
             return try {
-                Socket().use { it.connect(InetSocketAddress(node.server, node.port), TIMEOUT_MS) }
+                Socket().use { it.connect(InetSocketAddress(node.server, node.port), timeoutMs) }
                 Result(true, reachableOnly = true)
             } catch (e: Exception) {
                 Result(false, error = e.message ?: "unreachable")
@@ -61,8 +61,8 @@ object ProxyTester {
         var socket: Socket? = null
         try {
             socket = Socket()
-            socket.connect(InetSocketAddress(node.server, node.port), TIMEOUT_MS)
-            socket.soTimeout = TIMEOUT_MS
+            socket.connect(InetSocketAddress(node.server, node.port), timeoutMs)
+            socket.soTimeout = timeoutMs
             val out = socket.getOutputStream()
             val inp = socket.getInputStream()
 

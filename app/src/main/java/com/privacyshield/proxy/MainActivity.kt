@@ -43,6 +43,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var accountBackup: Button
     private lateinit var adapter: Adapter
     private var pendingStartId: String? = null
+    private var pendingHeaderStart = false
+    private var pendingOpen: Profile? = null
     private var protectedDataError: String? = null
     private var protectedRecoveryStarted = false
 
@@ -84,8 +86,22 @@ class MainActivity : AppCompatActivity() {
 
     private val vpnPermission =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
-            if (r.resultCode == RESULT_OK) pendingStartId?.let { launch(it) }
+            val header = pendingHeaderStart
+            val open = pendingOpen
+            val id = pendingStartId
+            pendingHeaderStart = false
+            pendingOpen = null
             pendingStartId = null
+            if (r.resultCode == RESULT_OK) {
+                when {
+                    open != null -> openAppsAfterConsent(open)
+                    header -> startEngineFromHeader()
+                    id != null -> launch(id)
+                }
+            } else if (header || open != null || id != null) {
+                android.util.Log.w("ShieldVpn", "step=consent-denied")
+                toast("VPN permission was not granted")
+            }
             refresh()
         }
 
@@ -110,6 +126,15 @@ class MainActivity : AppCompatActivity() {
             )
         }
         status = findViewById(R.id.homeStatus)
+        val mark = findViewById<View>(R.id.homeEngineMark)
+        val row = findViewById<View>(R.id.homeEngineRow)
+        val tap = View.OnClickListener { onHeaderEngineTap() }
+        mark.setOnClickListener(tap)
+        row.setOnClickListener(tap)
+        android.util.Log.i(
+            "ShieldVpn",
+            "step=header-bound class=${mark.javaClass.name} clickable=${mark.isClickable}"
+        )
         accountBackup = findViewById(R.id.accountBackup)
         accountBackup.setOnClickListener { openAccountSettings() }
         findViewById<Button>(R.id.privacyScan).setOnClickListener {
@@ -173,7 +198,24 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (::status.isInitialized) {
+            ContextCompat.registerReceiver(
+                this, engineReceiver,
+                android.content.IntentFilter(ShieldVpnService.ACTION_ENGINE),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        }
+    }
+
+    override fun onStop() {
+        if (::status.isInitialized) runCatching { unregisterReceiver(engineReceiver) }
+        super.onStop()
+    }
+
     override fun onPause() {
+        if (::status.isInitialized) status.removeCallbacks(enginePoll)
         super.onPause()
         // Keep the cloud copy current so a re-login always restores the latest setup.
         SupaSync.pushAsync(this)
@@ -188,6 +230,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
         refresh()
+        status.removeCallbacks(enginePoll)
+        status.postDelayed(enginePoll, 1000)
         maybeShowSetupHealth()
     }
 
@@ -231,6 +275,28 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private val enginePoll = object : Runnable {
+        override fun run() {
+            if (isFinishing || !::status.isInitialized) return
+            refreshEngineHeader()
+            status.postDelayed(this, 1000)
+        }
+    }
+
+    private val engineReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: Intent?) {
+            refreshEngineHeader()
+        }
+    }
+
+    private fun refreshEngineHeader() {
+        if (!::status.isInitialized || isFinishing) return
+        val on = ShieldVpnService.isRunning(this)
+        val text = status.text?.toString().orEmpty()
+        val showsOn = text.startsWith("Protected · Engine on")
+        if (on != showsOn) refresh()
+    }
+
     private fun refresh() {
         try {
             adapter.submit(ProfileStore.load(this), ProfileStore.activeId(this))
@@ -240,14 +306,64 @@ class MainActivity : AppCompatActivity() {
             recoverProtectedDataAsync()
         }
         val on = ShieldVpnService.isRunning(this)
-        status.text = when {
+        val active = ProfileStore.activeId(this)?.let { ProfileStore.get(this, it) }
+        val base = when {
             protectedDataError != null -> "Locked · $protectedDataError"
-            on -> "Protected · Engine on" + (ProfileStore.activeId(this)?.let { id ->
-                ProfileStore.get(this, id)?.let { " · ${it.name}" }
-            } ?: "")
+            on -> "Protected · Engine on" + com.privacyshield.proxy.core.DeviceRoute.headerSuffix(
+                active?.name, active?.config
+            )
             lastError.isNotEmpty() -> "Needs attention · $lastError"
             else -> "Ready · Engine off"
         }
+        status.text = base
+        val armed = ProxyGuardService.ARMED.values.firstOrNull { it.ip.isNotBlank() }
+        if (armed != null) {
+            Thread {
+                val extra = runCatching {
+                    com.privacyshield.proxy.core.ProfileStatus.warnings(
+                        this, armed.ip, armed.node.server, armed.node.port, armed.node.username
+                    )
+                }.getOrDefault(emptyList())
+                if (extra.isNotEmpty()) runOnUiThread {
+                    if (!isFinishing) status.text = base + "\n" + extra.joinToString("\n")
+                }
+            }.start()
+        }
+    }
+
+    private fun onHeaderEngineTap() {
+        android.util.Log.i("ShieldVpn", "step=header-tap running=${ShieldVpnService.isRunning(this)}")
+        if (ShieldVpnService.isRunning(this)) {
+            stopEngine()
+            toast("Stopping engine")
+            return
+        }
+        val prep = VpnService.prepare(this)
+        if (prep != null) {
+            pendingHeaderStart = true
+            vpnPermission.launch(prep)
+            return
+        }
+        startEngineFromHeader()
+    }
+
+    /** Start the tunnel without making a clone list the phone's catch-all route. */
+    private fun startEngineFromHeader() {
+        val active = ProfileStore.activeId(this)?.let { ProfileStore.get(this, it) }
+        if (active != null && !com.privacyshield.proxy.core.DeviceRoute.isCloneList(active.config)) {
+            launch(active.id)
+            return
+        }
+        lastError = ""
+        android.util.Log.i("ShieldVpn", "step=header-start")
+        ContextCompat.startForegroundService(this,
+            Intent(this, ShieldVpnService::class.java).setAction(ShieldVpnService.ACTION_START))
+        toast("Starting engine")
+        status.postDelayed({
+            refresh()
+            val err = runCatching { java.io.File(filesDir, "engine_error.txt").readText().trim() }.getOrDefault("")
+            if (err.isNotEmpty() && !ShieldVpnService.isRunning(this)) toast(err)
+        }, 1500)
     }
 
     private fun startProfile(id: String) {
@@ -350,10 +466,9 @@ class MainActivity : AppCompatActivity() {
             h.detail.text = "$proxyText\n$appNames" + (if (more > 0) " +$more more" else "") +
                     (if (guardLine != null) "\n$guardLine" else "")
 
-            // Clone-only lists route through the container (per-clone proxy), NOT this VPN — so they
-            // don't need Start and, crucially, don't conflict with each other (Android allows only
-            // ONE VPN, but any number of clone lists can run at once). Show "Open apps" for them so
-            // starting one never stops another.
+            // Clone-only lists still need this Android user's VpnService for the per-clone
+            // listeners. Android allows one VPN per user, so the work profile runs a second
+            // ShieldProxy with its own engine. "Open apps" starts that engine if it is down.
             val cloneOnly = p.config.bbMap.isNotEmpty() && p.config.appMap.isEmpty() &&
                     p.config.finalTarget == "DIRECT"
             if (cloneOnly) {
@@ -372,7 +487,7 @@ class MainActivity : AppCompatActivity() {
             h.itemView.setOnLongClickListener {
                 AlertDialog.Builder(this@MainActivity)
                     .setTitle(p.name)
-                    .setItems(arrayOf("Edit", "Open all apps", "🛑 Turn off proxy guard (close apps)", "🔔 Keep receiving messages", "Delete")) { _, w ->
+                    .setItems(arrayOf("Edit", "Open all apps", "🛑 Turn off proxy guard (close apps)", "🔔 Keep-alive per clone (off until checked)", "Delete")) { _, w ->
                         when (w) {
                             0 -> startActivity(Intent(this@MainActivity, ProfileEditActivity::class.java)
                                 .putExtra(ProfileEditActivity.EXTRA_PROFILE_ID, p.id))
@@ -550,13 +665,26 @@ class MainActivity : AppCompatActivity() {
                 .setPositiveButton("OK", null).show()
             return
         }
-        // Real phone apps route through OUR VPN, so it must be running for them. Clones route
-        // inside their container (not the VPN), so they can launch regardless.
-        if (realPkgs.isNotEmpty() && (!ShieldVpnService.isRunning(this) || ProfileStore.activeId(this) != p.id)) {
-            AlertDialog.Builder(this)
-                .setMessage("Start this list first, then open all apps so the phone apps route correctly.")
-                .setPositiveButton("OK", null).show()
+        val prep = VpnService.prepare(this)
+        if (prep != null) {
+            android.util.Log.i("ShieldVpn", "step=open-apps-consent profile=${p.name}")
+            pendingOpen = p
+            vpnPermission.launch(prep)
             return
+        }
+        openAppsAfterConsent(p)
+    }
+
+    private fun openAppsAfterConsent(p: Profile) {
+        val realPkgs = p.config.appMap.keys.toList()
+        val clonePlans = p.config.bbMap.map { (tag, nodeName) ->
+            Triple(tag, nodeName, p.config.nodes.firstOrNull { it.name == nodeName && it.isValid() })
+        }
+        if (!ShieldVpnService.isRunning(this)) {
+            android.util.Log.i("ShieldVpn", "step=open-apps-start profile=${p.name}")
+            ContextCompat.startForegroundService(this,
+                Intent(this, ShieldVpnService::class.java).setAction(ShieldVpnService.ACTION_START))
+            toast("Starting engine")
         }
         for (pkg in realPkgs) {
             packageManager.getLaunchIntentForPackage(pkg)?.let {
@@ -574,34 +702,41 @@ class MainActivity : AppCompatActivity() {
         android.widget.Toast.makeText(this, "Opening $total app(s)…", android.widget.Toast.LENGTH_SHORT).show()
     }
 
-    /** Turn on background keep-alive for every clone in this list (installs GMS + keeps the
-     *  container daemon alive). Honest: helps clones stay alive longer; full push-when-killed
-     *  is not guaranteed on a no-root device. */
+    /** Per-clone opt-in. Nothing is turned on unless the user checks that clone. */
     private fun enableKeepAlive(p: Profile) {
-        val users = HashMap<String, MutableSet<Int>>() // authority -> userIds
-        for (tag in p.config.bbMap.keys) {
-            val parts = tag.split(":", limit = 4)
-            val auth = parts.getOrNull(1) ?: continue
-            val uid = parts.getOrNull(2)?.toIntOrNull() ?: continue
-            users.getOrPut(auth) { mutableSetOf() }.add(uid)
-        }
-        if (users.isEmpty()) { toast("No clones in this list"); return }
-        Thread {
-            var ok = 0
-            for ((auth, uids) in users) for (uid in uids) {
-                try {
-                    val extras = android.os.Bundle().apply { putInt("userId", uid); putBoolean("enabled", true) }
-                    val r = contentResolver.call(com.privacyshield.proxy.core.BlackBoxBridge.baseFor(auth), "setKeepAlive", null, extras)
-                    if (r?.getBoolean("ok") == true) {
-                        ok++
-                        // Record that this user shares GMS/push, so AssignmentRules enforces one
-                        // consistent proxy for all its clones.
-                        com.privacyshield.proxy.core.GmsShareStore.setEnabled(this, auth, uid, true)
+        val tags = p.config.bbMap.keys.mapNotNull { com.privacyshield.proxy.core.AssignmentRules.parse(it) }
+        if (tags.isEmpty()) { toast("No clones in this list"); return }
+        com.privacyshield.proxy.core.GmsShareStore.migrate(this, tags.map { it.raw })
+        val checked = tags.map { com.privacyshield.proxy.core.GmsShareStore.isEnabled(this, it.raw) }.toBooleanArray()
+        val labels = tags.map { "${it.pkg} · user ${it.userId}" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Keep-alive is off until you opt in")
+            .setMultiChoiceItems(labels, checked) { _, which, on -> checked[which] = on }
+            .setPositiveButton("Save") { _, _ ->
+                Thread {
+                    var ok = 0
+                    tags.forEachIndexed { index, tag ->
+                        try {
+                            val extras = android.os.Bundle().apply {
+                                putInt("userId", tag.userId)
+                                putBoolean("enabled", checked[index])
+                            }
+                            val r = contentResolver.call(
+                                com.privacyshield.proxy.core.BlackBoxBridge.baseFor(tag.authority),
+                                "setKeepAlive", null, extras
+                            )
+                            com.privacyshield.proxy.core.GmsShareStore.setEnabled(this, tag.raw, checked[index])
+                            if (r?.getBoolean("ok") == true) ok++
+                        } catch (_: Exception) {
+                        }
                     }
-                } catch (_: Exception) {}
+                    runOnUiThread {
+                        toast("Keep-alive saved for $ok clone(s). Unchecked clones stay off.")
+                    }
+                }.start()
             }
-            runOnUiThread { toast("Keep-alive on for $ok clone(s). Background push isn't 100% guaranteed on a no-root phone.") }
-        }.start()
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun toast(m: String) = android.widget.Toast.makeText(this, m, android.widget.Toast.LENGTH_LONG).show()
@@ -756,6 +891,41 @@ class MainActivity : AppCompatActivity() {
                 }
                 return@Thread
             }
+            val userKey = "$auth:$uid"
+            if (com.privacyshield.proxy.core.CloneIdentityBook.isBlocked(this, userKey)) {
+                runOnUiThread {
+                    showCloneFailure(label, "Launch blocked: this Blackbox user shares an identity digest with another user.")
+                }
+                return@Thread
+            }
+            val identity = com.privacyshield.proxy.core.BlackBoxBridge.identityStatus(this, auth, uid)
+            if (identity.ok && identity.digest.isNotBlank() &&
+                com.privacyshield.proxy.core.CloneIdentityBook.remember(this, userKey, identity.digest)) {
+                com.privacyshield.proxy.core.CloneIdentityBook.block(this, listOf(userKey))
+                runOnUiThread {
+                    showCloneFailure(label, "Launch blocked: this Blackbox user shares an identity digest with another user.")
+                }
+                return@Thread
+            }
+
+            val port = com.privacyshield.proxy.core.CloneListeners.portFor(auth, uid, pkg)
+            runOnUiThread { showOpenProgress("Starting the engine and waiting for 127.0.0.1:$port…") }
+            if (!ShieldVpnService.isRunning(this)) {
+                ContextCompat.startForegroundService(this,
+                    Intent(this, ShieldVpnService::class.java).setAction(ShieldVpnService.ACTION_START))
+            }
+            if (!waitForClonePort(port)) {
+                val why = runCatching { java.io.File(filesDir, "engine_error.txt").readText().trim() }.getOrDefault("")
+                val reason = if (why.isNotEmpty()) "Engine couldn't start: $why"
+                    else "The per-clone listener on 127.0.0.1:$port did not open, so the app was not started."
+                android.util.Log.e("ShieldVpn", "step=listener-closed port=$port reason=$reason")
+                runOnUiThread {
+                    hideOpenProgress()
+                    showCloneFailure(label, reason)
+                }
+                return@Thread
+            }
+            runOnUiThread { showOpenProgress("Checking the proxy for $label…") }
 
             val verified = com.privacyshield.proxy.core.BlackBoxBridge
                 .assignAndVerifyRoute(
@@ -763,17 +933,26 @@ class MainActivity : AppCompatActivity() {
                     tested.city, tested.region, tested.latitude, tested.longitude,
                     tested.timezoneId
                 )
-            if (!verified.ok || verified.routeId.isBlank()
-                || verified.exitIp.isBlank()) {
+            val gate = com.privacyshield.proxy.core.CloneLaunchGate.decide(
+                verified.ok, verified.routeId, verified.exitIp, tested.ip,
+                verified.error, verified.state
+            )
+            if (gate.block != null) {
                 com.privacyshield.proxy.core.BlackBoxBridge.stopClone(this, auth, uid, pkg)
-                val reason = verified.error.ifBlank {
-                    "Route verification failed (${verified.state.ifBlank { "unknown state" }})."
+                android.util.Log.e("ShieldVpn", "step=launch-blocked ${gate.block}")
+                runOnUiThread {
+                    hideOpenProgress()
+                    showCloneFailure(label, gate.block)
                 }
-                runOnUiThread { showCloneFailure(label, reason) }
                 return@Thread
+            }
+            if (gate.warning != null) {
+                android.util.Log.w("ShieldVpn", "step=sensor-warn ${verified.error}")
             }
 
             runOnUiThread {
+                hideOpenProgress()
+                if (gate.warning != null) toast(gate.warning)
                 if (startCloneActivity(auth, uid, pkg)) {
                     toast("Connected and isolated - ${tested.city.ifBlank { tested.ip }}")
                     ProxyGuardService.arm(
@@ -786,6 +965,28 @@ class MainActivity : AppCompatActivity() {
             }
         }.start()
         return true
+    }
+
+    private var openProgress: AlertDialog? = null
+
+    private fun showOpenProgress(message: String) {
+        if (isFinishing) return
+        val showing = openProgress
+        if (showing != null && showing.isShowing) {
+            showing.setMessage(message)
+            return
+        }
+        openProgress = AlertDialog.Builder(this)
+            .setTitle("Opening through the proxy")
+            .setMessage(message)
+            .setCancelable(false)
+            .create()
+            .also { it.show() }
+    }
+
+    private fun hideOpenProgress() {
+        openProgress?.dismiss()
+        openProgress = null
     }
 
     private fun showCloneFailure(label: String, reason: String) {
@@ -863,6 +1064,24 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {
             false
         }
+    }
+
+    private fun waitForClonePort(port: Int): Boolean {
+        val began = System.currentTimeMillis()
+        val deadline = android.os.SystemClock.elapsedRealtime() + 10_000
+        val err = java.io.File(filesDir, "engine_error.txt")
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            val open = runCatching {
+                java.net.Socket().use {
+                    it.connect(java.net.InetSocketAddress("127.0.0.1", port), 250)
+                    true
+                }
+            }.getOrDefault(false)
+            if (open) return true
+            if (err.isFile && err.lastModified() >= began && err.length() > 0) return false
+            Thread.sleep(200)
+        }
+        return false
     }
 
     private fun freshSessionId(): String {

@@ -14,6 +14,8 @@ val suiteKeyPassword = providers.environmentVariable("SHIELD_SUITE_KEY_PASSWORD"
 val suiteSigningReady = listOf(
     suiteKeystorePath, suiteStorePassword, suiteKeyAlias, suiteKeyPassword
 ).all { !it.isNullOrBlank() }
+// Emulator CI builds a debug APK with the default debug key. Release stays on the suite key.
+val ciDebugSigning = providers.gradleProperty("ciDebugSigning").orNull == "true"
 val buildVersionCode = providers.gradleProperty("buildVersionCode")
     .orElse(providers.environmentVariable("BUILD_VERSION_CODE"))
     .orNull
@@ -38,7 +40,7 @@ android {
         versionName = "9.3"
 
         ndk {
-            // Match the ABIs the Mihomo .aar was built for (arm64/arm/x86_64).
+            // Phones ship arm. x86_64 is added on the debug build type for the emulator matrix.
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
     }
@@ -56,8 +58,13 @@ android {
 
     buildTypes {
         debug {
-            // Never let Gradle create/use its machine-specific debug keystore.
-            signingConfig = signingConfigs.getByName("suiteRelease")
+            ndk {
+                abiFilters += "x86_64"
+            }
+            if (!ciDebugSigning) {
+                // Release-shaped debug builds stay on the suite key. Emulator CI opts out.
+                signingConfig = signingConfigs.getByName("suiteRelease")
+            }
         }
         release {
             signingConfig = signingConfigs.getByName("suiteRelease")
@@ -76,6 +83,33 @@ android {
     buildFeatures {
         viewBinding = true
     }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+            if (ciDebugSigning) {
+                // The emulator only runs x86_64. Shipping both arm builds makes a
+                // ~200MB APK, and a cold :vpn start was still inside zygote when
+                // the foreground-service deadline fired.
+                excludes += "lib/arm64-v8a/**"
+                excludes += "lib/armeabi-v7a/**"
+                excludes += "lib/x86/**"
+            }
+        }
+    }
+}
+
+val realignedClashAar = layout.buildDirectory.file("generated/clashcore-16k.aar")
+val realignClashCore = tasks.register<Exec>("realignClashCore") {
+    inputs.file("libs/clashcore.aar")
+    inputs.file(rootProject.file("tools/realign_elf_16k.py"))
+    outputs.file(realignedClashAar)
+    commandLine(
+        "python3",
+        rootProject.file("tools/realign_elf_16k.py").absolutePath,
+        file("libs/clashcore.aar").absolutePath,
+        realignedClashAar.get().asFile.absolutePath
+    )
+    doFirst { realignedClashAar.get().asFile.parentFile.mkdirs() }
 }
 
 gradle.taskGraph.whenReady {
@@ -90,7 +124,10 @@ gradle.taskGraph.whenReady {
             task.startsWith("buildneeded") ||
             task.startsWith("builddependents")
     }
-    if (packagesApplication) {
+    val debugOnlyPackage = gradle.startParameter.taskNames
+        .map { it.substringAfterLast(':').lowercase() }
+        .all { it.contains("debug") || it.contains("androidtest") }
+    if (packagesApplication && !(ciDebugSigning && debugOnlyPackage)) {
         check(suiteSigningReady) {
             "Debug and release signing are locked to the permanent suite key. Set SHIELD_SUITE_KEYSTORE, " +
                 "SHIELD_SUITE_STORE_PASSWORD, SHIELD_SUITE_KEY_ALIAS, and " +
@@ -102,9 +139,11 @@ gradle.taskGraph.whenReady {
     }
 }
 
+val clashAar = files(realignedClashAar).apply { builtBy(realignClashCore) }
+
 dependencies {
-    // Mihomo (Clash.Meta) engine, built via gomobile bind (app/libs/clashcore.aar).
-    implementation(files("libs/clashcore.aar"))
+    // Mihomo engine, realigned to 16KB ELF pages before it is packaged.
+    implementation(clashAar)
 
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
@@ -117,3 +156,5 @@ dependencies {
     // verified exit metadata acceptance/rejection tests execute the real parser.
     testImplementation("org.json:json:20240303")
 }
+
+tasks.named("preBuild").configure { dependsOn(realignClashCore) }
