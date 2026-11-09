@@ -20,7 +20,8 @@ object VaultKeyStore {
     private const val KEY_VERSION = 2
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    private fun alias(ctx: Context) = ctx.packageName + KEY_ALIAS_SUFFIX
+    private fun alias(ctx: Context) =
+        AndroidProfile.current(ctx).keyAlias(ctx.packageName + KEY_ALIAS_SUFFIX)
 
     fun isReady(ctx: Context): Boolean = prefs(ctx).getInt("version", 0) == KEY_VERSION && load(ctx) != null
 

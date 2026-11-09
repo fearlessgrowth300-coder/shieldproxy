@@ -23,10 +23,10 @@ data class RoutingConfig(
     /** package/process name -> node name (or DIRECT / REJECT). Deterministic. */
     val appMap: LinkedHashMap<String, String> = LinkedHashMap(),
     /**
-     * BlackBox clone routes: tag "bb:<authority>:<userId>:<pkg>" -> node name. These do NOT go
-     * through this VPN (clones share one UID) — they're pushed into the container via its bridge.
-     * Kept in the saved profile so the UI can show them and re-apply them, but never emitted to
-     * the Mihomo config.
+     * BlackBox clone routes: tag "bb:<authority>:<userId>:<pkg>" -> node name.
+     * Each tag is emitted as its own loopback SOCKS listener (see [CloneListeners]) because
+     * every clone in a container shares one Android UID. The container is no longer excluded
+     * from the VPN while any clone route exists; packets that miss the listener are rejected.
      */
     val bbMap: LinkedHashMap<String, String> = LinkedHashMap(),
     val rules: MutableList<Rule> = mutableListOf(),
@@ -53,6 +53,11 @@ data class RoutingConfig(
 
     fun isRunnable(): Boolean =
         nodes.any { it.isValid() } || finalTarget == "DIRECT"
+
+    /** True when nothing in this config routes the phone's own apps. */
+    fun routesOnlyClones(): Boolean =
+        bbMap.isNotEmpty() && appMap.isEmpty() && finalTarget == "DIRECT" &&
+            rules.isEmpty() && rawRules.isEmpty()
 
     /** Every package that must be captured by the VPN (per-app allow-list). */
     fun routedPackages(): Set<String> =
@@ -151,7 +156,8 @@ data class RoutingConfig(
         if (valid.isEmpty()) {
             sb.append("  []\n")
         } else {
-            for (n in valid) sb.append(n.toClashYaml(serverOverride = serverResolver?.invoke(n.server)))
+            // A TLS proxy's certificate names its host, so it can never validate against a bare IP.
+            for (n in valid) sb.append(n.toClashYaml(serverOverride = if (n.tls) null else serverResolver?.invoke(n.server)))
         }
 
         // A selector group holding every node (+ DIRECT) for manual/UI selection.
@@ -161,6 +167,9 @@ data class RoutingConfig(
         sb.append("    proxies:\n")
         for (n in valid) sb.append("      - ").append(ProxyNode.quote(n.name)).append("\n")
         sb.append("      - DIRECT\n")
+
+        // Per-clone SOCKS inbounds. `proxy:` pins the inbound to that node before rule matching.
+        CloneListeners.appendListeners(sb, bbMap) { name -> nodeByName(name) != null }
 
         // Rule providers
         if (providers.isNotEmpty()) {
@@ -172,8 +181,8 @@ data class RoutingConfig(
         // user rules, then the final catch-all.
         sb.append("rules:\n")
         // (A) LEAK GUARDS — evaluated before any app route, so nothing slips past them.
-        // These harden the phone-app (VpnService) path; container clones are enforced
-        // separately in the BlackBox bridge.
+        // Clone listeners are pinned with `proxy:` and also named here. Container UID
+        // traffic that reached the TUN (the hook missed its port) is rejected.
         //
         // IPv6 kill: when IPv6 is off, drop every IPv6 destination. Otherwise a dual-stack
         // app could reach the internet over v6 around the (v4) tunnel and expose the real IP.
@@ -186,6 +195,7 @@ data class RoutingConfig(
         if (blockQuic) {
             sb.append("  - AND,((NETWORK,udp),(DST-PORT,443)),REJECT-DROP\n")
         }
+        CloneListeners.appendRules(sb, bbMap, uidOf)
         // Per-app UDP guard: any app routed to a proxy that CAN'T carry UDP must not emit UDP
         // at all, or it would fail (or leak). Block that app's UDP before its route rule.
         for ((pkg, node) in appMap) {

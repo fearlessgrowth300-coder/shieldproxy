@@ -86,6 +86,12 @@ object SetupHealth {
         return out
     }
 
+    /** Always-on VPN stays off. Lockdown drops the phone's connection when the tunnel is down. */
+    fun vpnLockdownIssue(ctx: Context): Issue? {
+        AndroidProfile.current(ctx)
+        return null
+    }
+
     /**
      * True when the phone is one of the brands that freezes or kills background apps, so callers can
      * explain *why* messages stop instead of only listing what to tap.
