@@ -83,8 +83,16 @@ class ProxyGuardService : Service() {
         checks = Executors.newFixedThreadPool(4)
         restoreArmedState()
         startForeground(FG_ID, buildNotification())
+        ensureEngine()
         ui.post(ticker)
         scheduleHeartbeat()
+    }
+
+    /** Bring the routing engine back after an update or a killed VPN process. Never shows the
+     *  consent dialog from this background service. */
+    private fun ensureEngine() {
+        if (!VpnConsent.isWanted(this) || ShieldVpnService.isRunning(this)) return
+        VpnConsent.startIfPrepared(this)
     }
 
     /**
@@ -171,6 +179,7 @@ class ProxyGuardService : Service() {
                 // Delivered by AlarmManager, which thaws this process first. Run one real pass here
                 // and immediately chain the next alarm, so the guard keeps checking (and reviving
                 // killed clones) even while the OEM keeps the process frozen between wake-ups.
+                ensureEngine()
                 if (ARMED.isNotEmpty()) {
                     runTests()
                     updateNotif()

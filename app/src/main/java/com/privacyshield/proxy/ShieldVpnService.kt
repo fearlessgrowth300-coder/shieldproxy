@@ -88,6 +88,15 @@ class ShieldVpnService : VpnService() {
             tunnel.post { stopTunnel() }
             return START_NOT_STICKY
         }
+        // An update clears VPN consent. establish() then returns null, so do not
+        // build a tunnel until the user has approved this package again.
+        if (VpnService.prepare(this) != null) {
+            wantRunning = false
+            android.util.Log.e("ShieldVpn", "step=failed establish consent missing")
+            VpnConsent.noteNeeded(this)
+            stopTunnel()
+            return START_NOT_STICKY
+        }
         // ACTION_START, or a START_STICKY restart after the process was killed
         // (intent == null) — in that case revive from the persisted active profile.
         wantRunning = true
@@ -191,7 +200,9 @@ class ShieldVpnService : VpnService() {
             stopTunnel(); return
         }
         if (pfd == null) {
+            wantRunning = false
             android.util.Log.e("ShieldVpn", "step=failed establish returned null")
+            VpnConsent.noteNeeded(this)
             stopTunnel(); return
         }
         tun = pfd
@@ -271,6 +282,7 @@ class ShieldVpnService : VpnService() {
             return
         }
         running = true
+        VpnConsent.clearNeeded(this)
         runCatching {
             File(filesDir, "engine_ready.txt").writeText("up\npid=${android.os.Process.myPid()}\n")
         }
