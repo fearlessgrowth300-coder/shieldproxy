@@ -262,7 +262,7 @@ class ShieldVpnService : VpnService() {
         try {
             configFile.writeText(cfg.toClashYaml(mihomoFd, uidResolver, serverResolver))
         } catch (e: Exception) {
-            runCatching { android.system.Os.close(mihomoFd) }
+            runCatching { ParcelFileDescriptor.adoptFd(mihomoFd).close() }
             android.util.Log.e("ShieldVpn", "step=failed config ${e.message}")
             stopTunnel(); return
         }
@@ -304,7 +304,7 @@ class ShieldVpnService : VpnService() {
             MihomoCore.start(home.absolutePath, configFile.absolutePath)
         } catch (e: Exception) {
             // start() was not reached, so Go never closed mihomoFd. Close that copy once.
-            runCatching { android.system.Os.close(mihomoFd) }
+            runCatching { ParcelFileDescriptor.adoptFd(mihomoFd).close() }
             android.util.Log.e("ShieldVpn", "step=failed before mihomo ${e.message}")
             stopTunnel(); return
         }
