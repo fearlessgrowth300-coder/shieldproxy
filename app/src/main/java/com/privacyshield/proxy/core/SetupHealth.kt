@@ -52,8 +52,6 @@ object SetupHealth {
     fun issues(ctx: Context): List<Issue> {
         val out = mutableListOf<Issue>()
 
-        vpnLockdownIssue(ctx)?.let { out += it }
-
         if (!isBatteryExempt(ctx)) {
             out += Issue(
                 "Allow ShieldProxy to run in the background",

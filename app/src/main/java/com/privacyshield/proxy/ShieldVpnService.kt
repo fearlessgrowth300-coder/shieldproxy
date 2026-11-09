@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -48,6 +49,7 @@ class ShieldVpnService : VpnService() {
          * own app's services across all processes).
          */
         fun isRunning(ctx: android.content.Context): Boolean {
+            if (java.io.File(ctx.filesDir, "engine_ready.txt").isFile) return true
             return try {
                 val am = ctx.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
                 @Suppress("DEPRECATION")
@@ -60,8 +62,17 @@ class ShieldVpnService : VpnService() {
         }
     }
 
+    override fun onCreate() {
+        super.onCreate()
+        // The foreground-service clock starts at startForegroundService(), which is
+        // before onStartCommand. Promote first so an early stop cannot race it.
+        enterForeground("Starting")
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        val action = intent?.action
+        enterForeground(if (action == ACTION_STOP) "Stopping" else "Starting")
+        if (action == ACTION_STOP) {
             wantRunning = false
             stopTunnel()
             return START_NOT_STICKY
@@ -102,7 +113,8 @@ class ShieldVpnService : VpnService() {
             com.privacyshield.proxy.core.EngineRoutes.merge(active, saved.map { it.config })
         } catch (e: Exception) {
             lastError = "Protected routing data could not be unlocked"
-            stopSelf()
+            android.util.Log.e("ShieldVpn", "step=failed unlock ${e.javaClass.simpleName}: ${e.message}")
+            stopTunnel()
             return
         }
 
@@ -145,10 +157,12 @@ class ShieldVpnService : VpnService() {
         val pfd = try {
             builder.establish()
         } catch (e: Exception) {
-            stopSelf(); return
+            android.util.Log.e("ShieldVpn", "step=failed establish ${e.javaClass.simpleName}: ${e.message}")
+            stopTunnel(); return
         }
         if (pfd == null) {
-            stopSelf(); return
+            android.util.Log.e("ShieldVpn", "step=failed establish returned null")
+            stopTunnel(); return
         }
         tun = pfd
 
@@ -222,10 +236,13 @@ class ShieldVpnService : VpnService() {
         runCatching { configFile.delete() }
         if (err.isNotEmpty()) {
             lastError = err
+            android.util.Log.e("ShieldVpn", "step=failed mihomo $err")
             stopTunnel()
             return
         }
         running = true
+        runCatching { File(filesDir, "engine_ready.txt").writeText("up") }
+        android.util.Log.i("ShieldVpn", "step=mihomo-ok")
     }
 
     /** Stop the engine + close the tun, but keep the service/foreground alive
@@ -240,6 +257,7 @@ class ShieldVpnService : VpnService() {
         } catch (_: Exception) {
         }
         tun = null
+        runCatching { File(filesDir, "engine_ready.txt").delete() }
     }
 
     private fun stopTunnel() {
@@ -262,6 +280,32 @@ class ShieldVpnService : VpnService() {
         wantRunning = false
         stopTunnel()
         super.onRevoke()
+    }
+
+    private fun enterForeground(text: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (nm.getNotificationChannel(CHANNEL_ID) == null) {
+                nm.createNotificationChannel(
+                    NotificationChannel(CHANNEL_ID, "ShieldProxy", NotificationManager.IMPORTANCE_LOW)
+                )
+            }
+        }
+        val open = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("ShieldProxy")
+            .setContentText(text)
+            .setSmallIcon(R.drawable.ic_shield)
+            .setOngoing(true)
+            .setContentIntent(open)
+            .build()
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIF_ID, notification)
+        }
     }
 
     private fun buildNotification(cfg: RoutingConfig): Notification {

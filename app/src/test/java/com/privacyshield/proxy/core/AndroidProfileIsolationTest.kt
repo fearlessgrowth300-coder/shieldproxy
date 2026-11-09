@@ -45,7 +45,9 @@ class AndroidProfileIsolationTest {
     fun workProfileGuidanceNamesTheWorkSettingsPage() {
         val text = AndroidProfile.vpnGuidance(true)
         assertTrue(text.contains("work profile"))
-        assertTrue(text.contains("Always-on VPN"))
+        assertTrue(text.contains("Leave Always-on VPN"))
+        assertTrue(text.contains("off"))
+        assertFalse(text.contains("turn on"))
         assertTrue(text.contains("kill switch"))
         assertTrue(AndroidProfile.label(10, true).startsWith("Work profile"))
         assertTrue(AndroidProfile.label(0, false).startsWith("Personal profile"))

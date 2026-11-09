@@ -797,6 +797,7 @@ class MainActivity : AppCompatActivity() {
             val port = com.privacyshield.proxy.core.CloneListeners.portFor(auth, uid, pkg)
             ContextCompat.startForegroundService(this,
                 Intent(this, ShieldVpnService::class.java).setAction(ShieldVpnService.ACTION_START))
+            status.postDelayed({ refresh() }, 1200)
             if (!waitForClonePort(port)) {
                 runOnUiThread {
                     showCloneFailure(label, "The per-clone listener on 127.0.0.1:$port did not open, so the app was not started.")
