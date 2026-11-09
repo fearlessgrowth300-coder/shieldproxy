@@ -151,6 +151,14 @@ class ShieldVpnService : VpnService() {
         )
     }
 
+    private fun ownVpnVisible(): Boolean {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return false
+        return cm.allNetworks.any { network ->
+            cm.getNetworkCapabilities(network)
+                ?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
+        }
+    }
+
     private fun loadPhoneConfig(): com.privacyshield.proxy.core.RoutingConfig {
         val active = RoutingConfig.load(this)
         val saved = runCatching { com.privacyshield.proxy.core.ProfileStore.load(this) }
@@ -178,13 +186,14 @@ class ShieldVpnService : VpnService() {
             android.util.Log.i(TAG, "step=replace-tunnel")
             stopEngineOnly()
             // Mihomo closes its tun fd after stop() returns. Establishing
-            // before that close deletes the new tun0 (API 33 rotate).
+            // before that close removes the new tun0. /proc/net/dev is not
+            // readable by this app on API 29+ (SELinux proc_net), so a denied
+            // read must not be treated as "the old tunnel is gone".
             val deadline = android.os.SystemClock.elapsedRealtime() + 4_000
-            while (android.os.SystemClock.elapsedRealtime() < deadline) {
-                val dev = runCatching { File("/proc/net/dev").readText() }.getOrDefault("")
-                if (!Regex("(?m)^\\s*tun0:").containsMatchIn(dev)) break
+            while (android.os.SystemClock.elapsedRealtime() < deadline && ownVpnVisible()) {
                 Thread.sleep(50)
             }
+            android.util.Log.i(TAG, "step=old-vpn-visible=${ownVpnVisible()}")
         }
         val cfg = try {
             loadPhoneConfig()
