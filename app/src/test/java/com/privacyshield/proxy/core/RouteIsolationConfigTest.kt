@@ -33,7 +33,7 @@ class RouteIsolationConfigTest {
         cfg.nodes.add(node("Secure", tls = true))
         cfg.nodes.add(node("Plain"))
         val yaml = cfg.toClashYaml(serverResolver = { "198.51.100.7" })
-        assertEquals(1, Regex("server: 198\.51\.100\.7").findAll(yaml).count())
+        assertEquals(2, yaml.split("server: 198.51.100.7").size)
     }
 
     @Test
