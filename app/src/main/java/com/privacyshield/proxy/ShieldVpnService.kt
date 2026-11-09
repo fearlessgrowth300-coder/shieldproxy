@@ -32,6 +32,12 @@ class ShieldVpnService : VpnService() {
         private const val NOTIF_ID = 1
         private const val WATCHDOG_MS = 20_000L
 
+        // Never the main looper. establish() calls back into the app; doing that
+        // work on the main thread deadlocks after VpnManagerService logs the call
+        // and the core never loads. This thread is not quit on destroy.
+        private val tunnelThread = android.os.HandlerThread("shield-vpn").apply { start() }
+        private val tunnel = android.os.Handler(tunnelThread.looper)
+
         @Volatile
         var running: Boolean = false
             private set
@@ -49,7 +55,12 @@ class ShieldVpnService : VpnService() {
          * own app's services across all processes).
          */
         fun isRunning(ctx: android.content.Context): Boolean {
-            if (java.io.File(ctx.filesDir, "engine_ready.txt").isFile) return true
+            val marker = java.io.File(ctx.filesDir, "engine_ready.txt")
+            if (marker.isFile) {
+                val text = runCatching { marker.readText() }.getOrDefault("")
+                val pid = Regex("pid=(\\d+)").find(text)?.groupValues?.get(1)?.toIntOrNull()
+                if (pid != null && java.io.File("/proc/$pid").isDirectory) return true
+            }
             return try {
                 val am = ctx.getSystemService(android.content.Context.ACTIVITY_SERVICE) as android.app.ActivityManager
                 @Suppress("DEPRECATION")
@@ -74,14 +85,22 @@ class ShieldVpnService : VpnService() {
         enterForeground(if (action == ACTION_STOP) "Stopping" else "Starting")
         if (action == ACTION_STOP) {
             wantRunning = false
-            stopTunnel()
+            tunnel.post { stopTunnel() }
             return START_NOT_STICKY
         }
         // ACTION_START, or a START_STICKY restart after the process was killed
         // (intent == null) — in that case revive from the persisted active profile.
         wantRunning = true
-        startTunnel()
-        scheduleWatchdog()
+        tunnel.post {
+            try {
+                startTunnel()
+                if (running && wantRunning) scheduleWatchdog()
+            } catch (t: Throwable) {
+                lastError = "Engine start failed"
+                android.util.Log.e("ShieldVpn", "step=start-crashed ${t.javaClass.simpleName}: ${t.message}", t)
+                stopTunnel()
+            }
+        }
         return START_STICKY
     }
 
@@ -94,8 +113,19 @@ class ShieldVpnService : VpnService() {
                 if (!wantRunning) return
                 if (!MihomoCore.running) {
                     // engine died on its own — rebuild the tunnel + restart Mihomo
-                    stopEngineOnly()
-                    startTunnel()
+                    tunnel.post {
+                        if (!wantRunning) return@post
+                        stopEngineOnly()
+                        try {
+                            startTunnel()
+                        } catch (t: Throwable) {
+                            lastError = "Engine restart failed"
+                            android.util.Log.e("ShieldVpn", "step=watchdog-crashed ${t.message}", t)
+                            stopTunnel()
+                        }
+                    }
+                } else {
+                    runCatching { File(filesDir, "engine_ready.txt").setLastModified(System.currentTimeMillis()) }
                 }
                 watchdog.postDelayed(this, WATCHDOG_MS)
             }
@@ -198,7 +228,7 @@ class ShieldVpnService : VpnService() {
         }
         configFile.writeText(cfg.toClashYaml(pfd.fd, uidResolver, serverResolver))
 
-        startForeground(NOTIF_ID, buildNotification(cfg))
+        show(buildNotification(cfg))
 
         // Protect Mihomo's outbound sockets so proxy connections exit the real
         // network instead of looping back into our own tun.
@@ -241,7 +271,9 @@ class ShieldVpnService : VpnService() {
             return
         }
         running = true
-        runCatching { File(filesDir, "engine_ready.txt").writeText("up") }
+        runCatching {
+            File(filesDir, "engine_ready.txt").writeText("up\npid=${android.os.Process.myPid()}\n")
+        }
         android.util.Log.i("ShieldVpn", "step=mihomo-ok")
     }
 
@@ -270,15 +302,16 @@ class ShieldVpnService : VpnService() {
     override fun onDestroy() {
         // If the system is killing us but the user still wants routing, DON'T flip
         // wantRunning — START_STICKY will restart us and the watchdog revives the engine.
+        // The worker thread stays up. Quitting it here dropped a queued restart.
         watchdog.removeCallbacksAndMessages(null)
-        stopEngineOnly()
+        tunnel.post { if (!wantRunning) stopEngineOnly() }
         super.onDestroy()
     }
 
     override fun onRevoke() {
         // User revoked VPN consent (or another VPN took over) — stop for real.
         wantRunning = false
-        stopTunnel()
+        tunnel.post { stopTunnel() }
         super.onRevoke()
     }
 
@@ -301,6 +334,10 @@ class ShieldVpnService : VpnService() {
             .setOngoing(true)
             .setContentIntent(open)
             .build()
+        show(notification)
+    }
+
+    private fun show(notification: Notification) {
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {

@@ -322,6 +322,7 @@ class MainActivity : AppCompatActivity() {
             Intent(this, ShieldVpnService::class.java).setAction(ShieldVpnService.ACTION_START)
         )
         status.postDelayed({ refresh() }, 900)
+        status.postDelayed({ refresh() }, 3000)
     }
 
     private fun stopEngine() {
@@ -798,6 +799,7 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.startForegroundService(this,
                 Intent(this, ShieldVpnService::class.java).setAction(ShieldVpnService.ACTION_START))
             status.postDelayed({ refresh() }, 1200)
+            status.postDelayed({ refresh() }, 3500)
             if (!waitForClonePort(port)) {
                 runOnUiThread {
                     showCloneFailure(label, "The per-clone listener on 127.0.0.1:$port did not open, so the app was not started.")

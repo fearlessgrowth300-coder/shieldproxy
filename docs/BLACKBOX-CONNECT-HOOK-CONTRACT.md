@@ -40,4 +40,4 @@ Each profile has its own kill switch, stored in that profile's app data, and it 
 
 ## What this does not cover
 
-ShieldProxy does not ship the hook. A phone test has to show one clone's packets arriving on its own listener and the other clone's packets arriving on the other, and a socket that bypasses the hook dying with `ECONNREFUSED` rather than leaving from the phone's address. Always-on VPN lockdown is still a system setting this app cannot turn on by itself. While the VPN process is down, Android will send the container out the real network unless that setting is on.
+ShieldProxy does not ship the hook. A phone test has to show one clone's packets arriving on its own listener and the other clone's packets arriving on the other, and a socket that bypasses the hook dying with `ECONNREFUSED` rather than leaving from the phone's address. Leave Always-on VPN off. Private DNS can stay on.
